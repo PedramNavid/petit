@@ -1,0 +1,15 @@
+---
+id: hello_world
+---
+
+# Hello World Job
+
+This is a simple demonstration of POML syntax.
+
+## Greet
+
+Say hello to the world!
+
+- **type**: command
+- **command**: echo
+- **args**: ["Hello, World from Petit!"]

@@ -2,6 +2,7 @@ pub mod config;
 pub mod core;
 pub mod events;
 pub mod execution;
+pub mod parsers;
 pub mod scheduler;
 pub mod storage;
 pub mod testing;
@@ -39,3 +40,5 @@ pub use testing::{
     Timeline, TimelineEntry, TimelineEventType, TrackedTask,
 };
 pub use scheduler::{Scheduler, SchedulerError, SchedulerHandle, SchedulerState};
+
+pub use parsers::{PomlParser, PomlDocument, PomlError, PomlMetadata, PomlTask};
