@@ -2,6 +2,48 @@
 //!
 //! `CommandTask` wraps shell commands and external executables, allowing them
 //! to be used as tasks in a DAG.
+//!
+//! # Security Considerations
+//!
+//! Commands are executed directly without shell expansion, which provides some
+//! protection against injection attacks. However, users should be aware of
+//! the following security considerations:
+//!
+//! - **Program Path**: No validation is performed on the program path. Any
+//!   binary accessible to the process can be executed. Consider validating
+//!   program paths against an allowlist in security-sensitive environments.
+//!
+//! - **Arguments**: Arguments are passed directly to the executable without
+//!   sanitization. Never construct arguments from untrusted user input without
+//!   proper validation.
+//!
+//! - **Environment Variables**: Environment variables are passed through without
+//!   validation. Be cautious about exposing sensitive data through environment
+//!   variables, and avoid passing secrets in plain text.
+//!
+//! - **Inherited Environment**: The `PATH` and other system environment variables
+//!   are inherited from the parent process unless explicitly overridden.
+//!
+//! ## Example: Unsafe Pattern
+//!
+//! ```ignore
+//! // UNSAFE: Never do this with untrusted input
+//! let user_input = get_untrusted_input();
+//! let task = CommandTask::builder("sh")
+//!     .arg("-c")
+//!     .arg(format!("echo {}", user_input)) // Command injection risk!
+//!     .build();
+//! ```
+//!
+//! ## Example: Safer Pattern
+//!
+//! ```ignore
+//! // SAFER: Pass data as separate arguments, not shell-interpreted strings
+//! let user_input = get_untrusted_input();
+//! let task = CommandTask::builder("echo")
+//!     .arg(&user_input) // Passed directly to echo, no shell interpretation
+//!     .build();
+//! ```
 
 use async_trait::async_trait;
 use std::path::PathBuf;
