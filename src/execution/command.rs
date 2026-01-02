@@ -128,11 +128,16 @@ impl Task for CommandTask {
                 .map_err(|e| TaskError::ExecutionFailed(e.to_string()))?;
         }
 
+        // Store exit code in context (always, so downstream tasks can check it)
+        let code = output.status.code().unwrap_or(-1);
+        ctx.outputs
+            .set("exit_code", &code)
+            .map_err(|e| TaskError::ExecutionFailed(e.to_string()))?;
+
         // Check exit status
         if output.status.success() {
             Ok(())
         } else {
-            let code = output.status.code().unwrap_or(-1);
             Err(TaskError::CommandFailed { code, stderr })
         }
     }
@@ -354,6 +359,40 @@ mod tests {
             }
             other => panic!("Expected CommandFailed, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_command_stores_exit_code_on_success() {
+        let task = CommandTask::builder("true")
+            .name("test")
+            .build();
+
+        let mut ctx = create_test_context();
+        let result = task.execute(&mut ctx).await;
+
+        assert!(result.is_ok());
+
+        // Exit code should be stored even on success
+        let exit_code: i32 = ctx.inputs.get("test.exit_code").unwrap();
+        assert_eq!(exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn test_command_stores_exit_code_on_failure() {
+        let task = CommandTask::builder("sh")
+            .name("test")
+            .arg("-c")
+            .arg("exit 42")
+            .build();
+
+        let mut ctx = create_test_context();
+        let result = task.execute(&mut ctx).await;
+
+        assert!(result.is_err());
+
+        // Exit code should be stored even on failure
+        let exit_code: i32 = ctx.inputs.get("test.exit_code").unwrap();
+        assert_eq!(exit_code, 42);
     }
 
     #[tokio::test]
