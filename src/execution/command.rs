@@ -113,20 +113,17 @@ impl Task for CommandTask {
             }
         };
 
-        // Store stdout and stderr in context
+        // Store stdout and stderr in context (always write, even if empty,
+        // so downstream tasks can distinguish "not run" from "no output")
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-        if !stdout.is_empty() {
-            ctx.outputs
-                .set("stdout", &stdout)
-                .map_err(|e| TaskError::ExecutionFailed(e.to_string()))?;
-        }
-        if !stderr.is_empty() {
-            ctx.outputs
-                .set("stderr", &stderr)
-                .map_err(|e| TaskError::ExecutionFailed(e.to_string()))?;
-        }
+        ctx.outputs
+            .set("stdout", &stdout)
+            .map_err(|e| TaskError::ExecutionFailed(e.to_string()))?;
+        ctx.outputs
+            .set("stderr", &stderr)
+            .map_err(|e| TaskError::ExecutionFailed(e.to_string()))?;
 
         // Check exit status
         if output.status.success() {
@@ -393,6 +390,27 @@ mod tests {
             }
             other => panic!("Expected Timeout, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_command_writes_empty_stdout_stderr_to_context() {
+        // Command that produces no output
+        let task = CommandTask::builder("true")
+            .name("test")
+            .build();
+
+        let mut ctx = create_test_context();
+        let result = task.execute(&mut ctx).await;
+
+        assert!(result.is_ok());
+
+        // Even with no output, stdout and stderr should be written to context
+        // so downstream tasks can distinguish "not run" from "no output"
+        let stdout: String = ctx.inputs.get("test.stdout").unwrap();
+        let stderr: String = ctx.inputs.get("test.stderr").unwrap();
+
+        assert_eq!(stdout, "");
+        assert_eq!(stderr, "");
     }
 
     #[test]
