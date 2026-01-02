@@ -49,10 +49,13 @@
 //!     .build();
 //!
 //! // Stage 3: Load to destination
+//! // Note: env vars are passed as literal strings, not shell-expanded.
+//! // To pass through a parent env var, read it explicitly:
+//! let db_password = std::env::var("DB_PASSWORD").unwrap_or_default();
 //! let load = CommandTask::builder("python")
 //!     .name("load_data")
 //!     .args(["-m", "etl.load", "--dest", "postgres://db/warehouse"])
-//!     .env("DB_PASSWORD", "${DB_PASSWORD}")
+//!     .env("DB_PASSWORD", db_password)
 //!     .timeout(Duration::from_secs(300))
 //!     .retry_policy(RetryPolicy::fixed(2, Duration::from_secs(30)))
 //!     .build();
