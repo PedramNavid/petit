@@ -2,6 +2,7 @@ pub mod config;
 pub mod core;
 pub mod events;
 pub mod execution;
+pub mod scheduler;
 pub mod storage;
 
 pub use core::context::{ContextError, ContextReader, ContextWriter, TaskContext};
@@ -30,3 +31,5 @@ pub use storage::SqliteStorage;
 pub use config::{
     ConfigError, GlobalConfig, JobConfig, RetryConfig, ScheduleConfig, TaskConfig, YamlLoader,
 };
+
+pub use scheduler::{Scheduler, SchedulerError, SchedulerHandle, SchedulerState};
