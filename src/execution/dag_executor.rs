@@ -190,7 +190,15 @@ impl DagExecutor {
 
                     // Execute (uses semaphore for concurrency control)
                     let task_start = Instant::now();
-                    let result = executor.execute(task.as_ref(), &mut task_ctx).await;
+                    let result = match executor.execute(task.as_ref(), &mut task_ctx).await {
+                        Ok(result) => result,
+                        Err(e) => TaskResult::failure(
+                            task_id.clone(),
+                            0,
+                            task_start.elapsed(),
+                            e.to_string(),
+                        ),
+                    };
                     let task_duration = task_start.elapsed();
 
                     // Merge outputs back to shared store

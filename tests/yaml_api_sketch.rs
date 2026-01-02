@@ -635,7 +635,7 @@ async fn test_task_executor_directly() {
         .build();
 
     let mut ctx = create_test_context();
-    let result = executor.execute(&task, &mut ctx).await;
+    let result = executor.execute(&task, &mut ctx).await.unwrap();
 
     assert!(result.success);
     assert_eq!(result.attempts, 1);

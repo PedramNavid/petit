@@ -12,7 +12,7 @@ use tokio::time::sleep;
 
 use crate::core::context::TaskContext;
 use crate::core::retry::RetryCondition;
-use crate::core::task::Task;
+use crate::core::task::{Task, TaskError};
 use crate::core::types::TaskId;
 
 /// Result of executing a task.
@@ -86,6 +86,19 @@ impl TaskExecutor {
         self.semaphore.available_permits()
     }
 
+    /// Close the executor's semaphore.
+    ///
+    /// This prevents any new tasks from being executed and causes pending
+    /// `execute` calls to return an error. Use this for graceful shutdown.
+    pub fn close(&self) {
+        self.semaphore.close();
+    }
+
+    /// Check if the executor's semaphore is closed.
+    pub fn is_closed(&self) -> bool {
+        self.semaphore.is_closed()
+    }
+
     /// Execute a task with retry logic.
     ///
     /// This method will:
@@ -93,11 +106,24 @@ impl TaskExecutor {
     /// 2. Execute the task
     /// 3. Retry on failure according to the task's retry policy
     /// 4. Return the result with attempt count and duration
-    pub async fn execute(&self, task: &dyn Task, ctx: &mut TaskContext) -> TaskResult {
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskError::ExecutionFailed` if the executor's semaphore is closed,
+    /// which can happen during graceful shutdown.
+    pub async fn execute(
+        &self,
+        task: &dyn Task,
+        ctx: &mut TaskContext,
+    ) -> Result<TaskResult, TaskError> {
         // Acquire semaphore permit for concurrency control
-        let _permit = self.semaphore.acquire().await.expect("semaphore closed");
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| TaskError::ExecutionFailed("executor semaphore closed".to_string()))?;
 
-        Self::execute_with_retry(task, ctx).await
+        Ok(Self::execute_with_retry(task, ctx).await)
     }
 
     /// Execute a task without acquiring a semaphore permit.
@@ -353,7 +379,7 @@ mod tests {
         };
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(result.success);
         assert_eq!(result.attempts, 1);
@@ -369,7 +395,7 @@ mod tests {
         };
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(!result.success);
         assert_eq!(result.attempts, 1);
@@ -388,7 +414,7 @@ mod tests {
         );
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(result.success);
         assert_eq!(result.attempts, 3); // 2 failures + 1 success
@@ -406,7 +432,7 @@ mod tests {
         let mut ctx = create_test_context();
 
         let start = Instant::now();
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
         let elapsed = start.elapsed();
 
         assert!(result.success);
@@ -424,7 +450,7 @@ mod tests {
         );
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(!result.success);
         assert_eq!(result.attempts, 3); // 1 initial + 2 retries
@@ -446,7 +472,7 @@ mod tests {
             };
             handles.push(tokio::spawn(async move {
                 let mut ctx = create_test_context();
-                executor.execute(&task, &mut ctx).await
+                executor.execute(&task, &mut ctx).await.unwrap()
             }));
         }
 
@@ -478,7 +504,7 @@ mod tests {
         );
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(result.success);
         assert_eq!(result.attempts, 3);
@@ -495,7 +521,7 @@ mod tests {
         };
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(!result.success);
         assert_eq!(result.attempts, 1); // No retries for non-transient errors
@@ -511,7 +537,7 @@ mod tests {
         );
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(!result.success);
         assert_eq!(result.attempts, 1); // No retries when condition is Never
@@ -527,7 +553,7 @@ mod tests {
         };
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(result.success);
         assert!(result.duration >= Duration::from_millis(50));
@@ -546,5 +572,25 @@ mod tests {
         let executor = TaskExecutor::default();
 
         assert_eq!(executor.max_concurrency(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_execute_returns_error_when_semaphore_closed() {
+        let executor = TaskExecutor::new(4);
+        let task = SuccessTask {
+            name: "test_task".to_string(),
+        };
+        let mut ctx = create_test_context();
+
+        // Close the semaphore before executing
+        executor.close();
+        assert!(executor.is_closed());
+
+        // Execute should return an error, not panic
+        let result = executor.execute(&task, &mut ctx).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("executor semaphore closed"));
     }
 }
