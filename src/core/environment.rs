@@ -89,6 +89,11 @@ impl Environment {
     pub fn to_vec(&self) -> Vec<(String, String)> {
         self.vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
+
+    /// Iterate over the environment variables.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.vars.iter()
+    }
 }
 
 impl FromIterator<(String, String)> for Environment {

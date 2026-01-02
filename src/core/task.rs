@@ -22,8 +22,13 @@ pub enum TaskError {
     Timeout(std::time::Duration),
 
     /// External command failed with exit code.
-    #[error("command exited with code {0}")]
-    CommandFailed(i32),
+    #[error("command exited with code {code}: {stderr}")]
+    CommandFailed {
+        /// The exit code returned by the command.
+        code: i32,
+        /// The stderr output from the command.
+        stderr: String,
+    },
 
     /// Error accessing task context.
     #[error("context error: {0}")]
@@ -365,7 +370,10 @@ mod tests {
         let err = TaskError::ExecutionFailed("test error".to_string());
         assert_eq!(err.to_string(), "execution failed: test error");
 
-        let err = TaskError::CommandFailed(1);
-        assert_eq!(err.to_string(), "command exited with code 1");
+        let err = TaskError::CommandFailed {
+            code: 1,
+            stderr: "error message".to_string(),
+        };
+        assert_eq!(err.to_string(), "command exited with code 1: error message");
     }
 }
