@@ -37,7 +37,11 @@ pub enum RetryCondition {
 impl RetryPolicy {
     /// Create a policy with no retries.
     pub fn none() -> Self {
-        todo!()
+        Self {
+            max_attempts: 0,
+            delay: Duration::ZERO,
+            retry_on: RetryCondition::Never,
+        }
     }
 
     /// Create a policy with fixed delay retries.
@@ -46,17 +50,22 @@ impl RetryPolicy {
     /// * `max_attempts` - Maximum retry attempts (not including initial try)
     /// * `delay` - Fixed delay between retries
     pub fn fixed(max_attempts: u32, delay: Duration) -> Self {
-        todo!()
+        Self {
+            max_attempts,
+            delay,
+            retry_on: RetryCondition::Always,
+        }
     }
 
     /// Builder: set the retry condition.
-    pub fn with_condition(self, condition: RetryCondition) -> Self {
-        todo!()
+    pub fn with_condition(mut self, condition: RetryCondition) -> Self {
+        self.retry_on = condition;
+        self
     }
 
     /// Check if retries are enabled.
     pub fn is_enabled(&self) -> bool {
-        todo!()
+        self.max_attempts > 0 && self.retry_on != RetryCondition::Never
     }
 
     /// Check if we should retry given the current attempt count.
@@ -64,12 +73,15 @@ impl RetryPolicy {
     /// # Arguments
     /// * `attempts` - Number of attempts already made (including failed ones)
     pub fn should_retry(&self, attempts: u32) -> bool {
-        todo!()
+        if self.retry_on == RetryCondition::Never {
+            return false;
+        }
+        attempts <= self.max_attempts
     }
 
     /// Get the delay before the next retry.
     pub fn get_delay(&self) -> Duration {
-        todo!()
+        self.delay
     }
 }
 

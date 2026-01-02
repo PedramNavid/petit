@@ -41,7 +41,7 @@ pub enum TaskError {
 impl TaskError {
     /// Check if this error is considered transient (should trigger retry).
     pub fn is_transient(&self) -> bool {
-        todo!()
+        matches!(self, TaskError::Transient(_) | TaskError::Timeout(_))
     }
 }
 

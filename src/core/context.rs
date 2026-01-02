@@ -73,53 +73,82 @@ impl TaskContext {
         task_id: TaskId,
         config: Arc<HashMap<String, Value>>,
     ) -> Self {
-        todo!()
+        Self {
+            inputs: ContextReader::new(store.clone()),
+            outputs: ContextWriter::new(store, task_id),
+            config,
+        }
     }
 
     /// Get a configuration value by key.
     pub fn get_config<T: DeserializeOwned>(&self, key: &str) -> Result<T, ContextError> {
-        todo!()
+        self.config
+            .get(key)
+            .ok_or_else(|| ContextError::KeyNotFound(key.to_string()))
+            .and_then(|v| {
+                serde_json::from_value(v.clone()).map_err(|e| ContextError::DeserializationError {
+                    key: key.to_string(),
+                    message: e.to_string(),
+                })
+            })
     }
 
     /// Get an optional configuration value.
     pub fn get_config_optional<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
-        todo!()
+        self.config
+            .get(key)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 }
 
 impl ContextReader {
     /// Create a new context reader.
     pub fn new(store: Arc<RwLock<HashMap<String, Value>>>) -> Self {
-        todo!()
+        Self { store }
     }
 
     /// Get a value by key.
     ///
     /// Keys can be simple ("my_key") or namespaced ("task_id.my_key").
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T, ContextError> {
-        todo!()
+        let store = self.store.read().map_err(|_| ContextError::LockPoisoned)?;
+        let value = store
+            .get(key)
+            .ok_or_else(|| ContextError::KeyNotFound(key.to_string()))?;
+        serde_json::from_value(value.clone()).map_err(|e| ContextError::DeserializationError {
+            key: key.to_string(),
+            message: e.to_string(),
+        })
     }
 
     /// Get an optional value by key. Returns None if key doesn't exist.
     pub fn get_optional<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
-        todo!()
+        let store = self.store.read().ok()?;
+        let value = store.get(key)?;
+        serde_json::from_value(value.clone()).ok()
     }
 
     /// Check if a key exists in the context.
     pub fn contains(&self, key: &str) -> bool {
-        todo!()
+        self.store
+            .read()
+            .map(|s| s.contains_key(key))
+            .unwrap_or(false)
     }
 
     /// Get all keys in the context.
     pub fn keys(&self) -> Vec<String> {
-        todo!()
+        self.store
+            .read()
+            .map(|s| s.keys().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
 impl ContextWriter {
     /// Create a new context writer for a specific task.
     pub fn new(store: Arc<RwLock<HashMap<String, Value>>>, task_id: TaskId) -> Self {
-        todo!()
+        Self { store, task_id }
     }
 
     /// Set a value in the context.
@@ -127,17 +156,25 @@ impl ContextWriter {
     /// The key will be automatically prefixed with the task ID.
     /// e.g., setting "result" from task "extract" creates "extract.result"
     pub fn set<T: Serialize>(&self, key: &str, value: T) -> Result<(), ContextError> {
-        todo!()
+        let full_key = format!("{}.{}", self.task_id, key);
+        self.set_raw(&full_key, value)
     }
 
     /// Set a value with an explicit full key (no auto-prefixing).
     pub fn set_raw<T: Serialize>(&self, key: &str, value: T) -> Result<(), ContextError> {
-        todo!()
+        let json_value =
+            serde_json::to_value(value).map_err(|e| ContextError::SerializationError {
+                key: key.to_string(),
+                message: e.to_string(),
+            })?;
+        let mut store = self.store.write().map_err(|_| ContextError::LockPoisoned)?;
+        store.insert(key.to_string(), json_value);
+        Ok(())
     }
 
     /// Get the task ID associated with this writer.
     pub fn task_id(&self) -> &TaskId {
-        todo!()
+        &self.task_id
     }
 }
 
@@ -206,7 +243,13 @@ mod tests {
 
         let reader = ContextReader::new(store);
         let value: Record = reader.get("record").unwrap();
-        assert_eq!(value, Record { id: 1, name: "test".to_string() });
+        assert_eq!(
+            value,
+            Record {
+                id: 1,
+                name: "test".to_string()
+            }
+        );
     }
 
     #[test]
@@ -286,11 +329,7 @@ mod tests {
         let mut config = HashMap::new();
         config.insert("batch_size".to_string(), serde_json::json!(100));
 
-        let ctx = TaskContext::new(
-            store,
-            TaskId::new("my_task"),
-            Arc::new(config),
-        );
+        let ctx = TaskContext::new(store, TaskId::new("my_task"), Arc::new(config));
 
         let batch_size: i32 = ctx.get_config("batch_size").unwrap();
         assert_eq!(batch_size, 100);

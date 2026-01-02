@@ -25,41 +25,41 @@ pub struct DagId(String);
 impl TaskId {
     /// Create a new TaskId from a string.
     pub fn new(id: impl Into<String>) -> Self {
-        todo!()
+        Self(id.into())
     }
 
     /// Get the underlying string value.
     pub fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
 impl JobId {
     /// Create a new JobId from a string.
     pub fn new(id: impl Into<String>) -> Self {
-        todo!()
+        Self(id.into())
     }
 
     /// Get the underlying string value.
     pub fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
 impl RunId {
     /// Generate a new random RunId.
     pub fn new() -> Self {
-        todo!()
+        Self(Uuid::new_v4())
     }
 
     /// Create a RunId from an existing UUID.
     pub fn from_uuid(uuid: Uuid) -> Self {
-        todo!()
+        Self(uuid)
     }
 
     /// Get the underlying UUID.
     pub fn as_uuid(&self) -> &Uuid {
-        todo!()
+        &self.0
     }
 }
 
@@ -72,36 +72,36 @@ impl Default for RunId {
 impl DagId {
     /// Create a new DagId from a string.
     pub fn new(id: impl Into<String>) -> Self {
-        todo!()
+        Self(id.into())
     }
 
     /// Get the underlying string value.
     pub fn as_str(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
 impl fmt::Display for TaskId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        write!(f, "{}", self.0)
     }
 }
 
 impl fmt::Display for JobId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        write!(f, "{}", self.0)
     }
 }
 
 impl fmt::Display for RunId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        write!(f, "{}", self.0)
     }
 }
 
 impl fmt::Display for DagId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        write!(f, "{}", self.0)
     }
 }
 
