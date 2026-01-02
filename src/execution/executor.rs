@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
+use tracing::{debug, info_span, warn, Instrument};
 
 use crate::core::context::TaskContext;
 use crate::core::retry::RetryCondition;
@@ -116,12 +117,17 @@ impl TaskExecutor {
         task: &dyn Task,
         ctx: &mut TaskContext,
     ) -> Result<TaskResult, TaskError> {
+        let task_name = task.name();
+        debug!(task = %task_name, "acquiring execution permit");
+
         // Acquire semaphore permit for concurrency control
         let _permit = self
             .semaphore
             .acquire()
             .await
             .map_err(|_| TaskError::ExecutionFailed("executor semaphore closed".to_string()))?;
+
+        debug!(task = %task_name, "permit acquired, starting execution");
 
         Ok(Self::execute_with_retry(task, ctx).await)
     }
@@ -130,21 +136,49 @@ impl TaskExecutor {
     ///
     /// Use this when you're managing concurrency externally or for testing.
     pub async fn execute_without_permit(&self, task: &dyn Task, ctx: &mut TaskContext) -> TaskResult {
+        let task_name = task.name();
+        debug!(task = %task_name, "starting execution (no permit required)");
+
         Self::execute_with_retry(task, ctx).await
     }
 
     /// Core retry loop used by both execute methods.
     async fn execute_with_retry(task: &dyn Task, ctx: &mut TaskContext) -> TaskResult {
-        let task_id = TaskId::new(task.name());
+        let task_name = task.name().to_string();
+        let task_id = TaskId::new(&task_name);
         let start_time = Instant::now();
         let retry_policy = task.retry_policy();
 
         // max_attempts includes the initial attempt + retries
         let max_attempts = retry_policy.max_attempts + 1;
 
+        let span = info_span!(
+            "task_execution",
+            task = %task_name,
+            max_attempts = max_attempts,
+        );
+        let _enter = span.enter();
+
         for attempt in 1..=max_attempts {
-            match task.execute(ctx).await {
+            let attempt_span = info_span!(
+                "task_attempt",
+                task = %task_name,
+                attempt = attempt,
+                max_attempts = max_attempts,
+            );
+
+            let result = async { task.execute(ctx).await }
+                .instrument(attempt_span)
+                .await;
+
+            match result {
                 Ok(()) => {
+                    debug!(
+                        task = %task_name,
+                        attempts = attempt,
+                        duration_ms = %start_time.elapsed().as_millis(),
+                        "task completed successfully"
+                    );
                     return TaskResult::success(task_id, attempt, start_time.elapsed());
                 }
                 Err(err) => {
@@ -156,8 +190,25 @@ impl TaskExecutor {
                         };
 
                     if can_retry {
+                        let delay_ms = retry_policy.delay.as_millis();
+                        warn!(
+                            task = %task_name,
+                            attempt = attempt,
+                            max_attempts = max_attempts,
+                            error = %err,
+                            delay_ms = %delay_ms,
+                            is_transient = err.is_transient(),
+                            "task failed, retrying"
+                        );
                         sleep(retry_policy.delay).await;
                     } else {
+                        warn!(
+                            task = %task_name,
+                            attempts = attempt,
+                            error = %err,
+                            duration_ms = %start_time.elapsed().as_millis(),
+                            "task failed permanently"
+                        );
                         return TaskResult::failure(
                             task_id,
                             attempt,
