@@ -1,0 +1,45 @@
+# Example data pipeline with dependencies
+id: data_pipeline
+name: Data Pipeline
+schedule: "0 0 2 * * *"  # 2 AM daily
+
+config:
+  batch_size: 1000
+  output_dir: /tmp/data
+
+tasks:
+  - id: extract
+    type: command
+    command: echo
+    args: ["Extracting data..."]
+    environment:
+      STAGE: extract
+
+  - id: transform
+    type: command
+    command: echo
+    args: ["Transforming data..."]
+    depends_on: [extract]
+    environment:
+      STAGE: transform
+
+  - id: validate
+    type: command
+    command: echo
+    args: ["Validating data..."]
+    depends_on: [transform]
+    condition: all_success
+
+  - id: load
+    type: command
+    command: echo
+    args: ["Loading data to destination..."]
+    depends_on: [validate]
+    condition: all_success
+
+  - id: notify_success
+    type: command
+    command: echo
+    args: ["Pipeline completed successfully!"]
+    depends_on: [load]
+    condition: all_done

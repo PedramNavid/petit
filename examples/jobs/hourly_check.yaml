@@ -1,0 +1,22 @@
+# Hourly health check job with retries
+id: hourly_check
+name: Hourly Health Check
+schedule: "0 0 * * * *"  # Every hour at :00
+
+tasks:
+  - id: check_api
+    type: command
+    command: curl
+    args: ["-s", "-o", "/dev/null", "-w", "%{http_code}", "https://httpbin.org/get"]
+    retry:
+      max_attempts: 3
+      delay_secs: 5
+      condition: always
+    environment:
+      CHECK_NAME: api_health
+
+  - id: report_status
+    type: command
+    command: echo
+    args: ["Health check completed"]
+    depends_on: [check_api]

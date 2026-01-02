@@ -2,6 +2,15 @@
 name = "petit"
 version = "0.1.0"
 edition = "2024"
+description = "A minimal, lightweight task orchestrator with cron-like scheduling"
+
+[[bin]]
+name = "petit"
+path = "src/main.rs"
+
+[lib]
+name = "petit"
+path = "src/lib.rs"
 
 [dependencies]
 async-trait = "0.1"
@@ -15,6 +24,9 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"], optional = tru
 cron = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 use crate::core::context::TaskContext;
 use crate::core::dag::{Dag, TaskCondition};
 use crate::core::types::TaskId;
+use crate::events::{Event, EventBus};
 
 use super::executor::{TaskExecutor, TaskResult};
 
@@ -94,7 +95,20 @@ impl DagExecutor {
     ///
     /// Tasks are executed in topological order, with independent tasks
     /// running in parallel up to the executor's concurrency limit.
+    ///
+    /// If an EventBus is provided, task-level events (TaskStarted, TaskCompleted,
+    /// TaskFailed) will be emitted.
     pub async fn execute(&self, dag: &Dag, ctx: &mut TaskContext) -> DagResult {
+        self.execute_with_events(dag, ctx, None).await
+    }
+
+    /// Execute a DAG with optional event emission.
+    pub async fn execute_with_events(
+        &self,
+        dag: &Dag,
+        ctx: &mut TaskContext,
+        event_bus: Option<Arc<EventBus>>,
+    ) -> DagResult {
         let start_time = Instant::now();
 
         // Track task statuses
@@ -143,17 +157,25 @@ impl DagExecutor {
 
             for task_id in ready_tasks {
                 let dag_clone = dag.clone();
+                let dag_id = dag.id().clone();
                 let statuses_clone = Arc::clone(&statuses);
                 let results_clone = Arc::clone(&results);
                 let executor = Arc::clone(&self.task_executor);
                 let store = shared_store.clone();
                 let config = ctx.config.clone();
+                let event_bus = event_bus.clone();
 
                 handles.push(tokio::spawn(async move {
                     // Mark as running
                     {
                         let mut statuses_write = statuses_clone.write().await;
                         statuses_write.insert(task_id.clone(), TaskStatus::Running);
+                    }
+
+                    // Emit TaskStarted event
+                    if let Some(ref bus) = event_bus {
+                        bus.emit(Event::task_started(task_id.clone(), dag_id.clone()))
+                            .await;
                     }
 
                     // Get the task
@@ -167,7 +189,9 @@ impl DagExecutor {
                     let mut task_ctx = TaskContext::new(task_store.clone(), task_id.clone(), config);
 
                     // Execute (uses semaphore for concurrency control)
+                    let task_start = Instant::now();
                     let result = executor.execute(task.as_ref(), &mut task_ctx).await;
+                    let task_duration = task_start.elapsed();
 
                     // Merge outputs back to shared store
                     if let Ok(outputs) = task_store.read() {
@@ -177,14 +201,56 @@ impl DagExecutor {
                     }
 
                     // Update status based on result
+                    let status = if result.success {
+                        TaskStatus::Completed
+                    } else {
+                        TaskStatus::Failed
+                    };
                     {
                         let mut statuses_write = statuses_clone.write().await;
-                        let status = if result.success {
-                            TaskStatus::Completed
+                        statuses_write.insert(task_id.clone(), status.clone());
+                    }
+
+                    // Read stdout/stderr/exit_code from context
+                    let stdout: Option<String> = task_store
+                        .read()
+                        .ok()
+                        .and_then(|s| s.get(&format!("{}.stdout", task_id.as_str())).cloned())
+                        .and_then(|v| serde_json::from_value(v).ok());
+                    let stderr: Option<String> = task_store
+                        .read()
+                        .ok()
+                        .and_then(|s| s.get(&format!("{}.stderr", task_id.as_str())).cloned())
+                        .and_then(|v| serde_json::from_value(v).ok());
+                    let exit_code: Option<i32> = task_store
+                        .read()
+                        .ok()
+                        .and_then(|s| s.get(&format!("{}.exit_code", task_id.as_str())).cloned())
+                        .and_then(|v| serde_json::from_value(v).ok());
+
+                    // Emit TaskCompleted or TaskFailed event
+                    if let Some(ref bus) = event_bus {
+                        if result.success {
+                            bus.emit(Event::task_completed_with_output(
+                                task_id.clone(),
+                                dag_id,
+                                task_duration,
+                                stdout,
+                                stderr,
+                                exit_code,
+                            ))
+                            .await;
                         } else {
-                            TaskStatus::Failed
-                        };
-                        statuses_write.insert(task_id.clone(), status);
+                            bus.emit(Event::task_failed_with_output(
+                                task_id.clone(),
+                                dag_id,
+                                result.error.clone().unwrap_or_else(|| "unknown error".to_string()),
+                                stdout,
+                                stderr,
+                                exit_code,
+                            ))
+                            .await;
+                        }
                     }
 
                     // Store result

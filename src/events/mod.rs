@@ -25,6 +25,9 @@ pub enum Event {
         task_id: TaskId,
         dag_id: DagId,
         duration: Duration,
+        stdout: Option<String>,
+        stderr: Option<String>,
+        exit_code: Option<i32>,
         timestamp: Instant,
     },
 
@@ -33,6 +36,9 @@ pub enum Event {
         task_id: TaskId,
         dag_id: DagId,
         error: String,
+        stdout: Option<String>,
+        stderr: Option<String>,
+        exit_code: Option<i32>,
         timestamp: Instant,
     },
 
@@ -90,6 +96,29 @@ impl Event {
             task_id,
             dag_id,
             duration,
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            timestamp: Instant::now(),
+        }
+    }
+
+    /// Create a TaskCompleted event with output details.
+    pub fn task_completed_with_output(
+        task_id: TaskId,
+        dag_id: DagId,
+        duration: Duration,
+        stdout: Option<String>,
+        stderr: Option<String>,
+        exit_code: Option<i32>,
+    ) -> Self {
+        Event::TaskCompleted {
+            task_id,
+            dag_id,
+            duration,
+            stdout,
+            stderr,
+            exit_code,
             timestamp: Instant::now(),
         }
     }
@@ -100,6 +129,29 @@ impl Event {
             task_id,
             dag_id,
             error,
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            timestamp: Instant::now(),
+        }
+    }
+
+    /// Create a TaskFailed event with output details.
+    pub fn task_failed_with_output(
+        task_id: TaskId,
+        dag_id: DagId,
+        error: String,
+        stdout: Option<String>,
+        stderr: Option<String>,
+        exit_code: Option<i32>,
+    ) -> Self {
+        Event::TaskFailed {
+            task_id,
+            dag_id,
+            error,
+            stdout,
+            stderr,
+            exit_code,
             timestamp: Instant::now(),
         }
     }
@@ -466,5 +518,125 @@ mod tests {
         // Should not panic even with no handlers
         bus.emit(Event::task_started(TaskId::new("test"), DagId::new("dag")))
             .await;
+    }
+
+    #[tokio::test]
+    async fn test_task_completed_with_output() {
+        let handler = Arc::new(RecordingHandler::new());
+        let bus = EventBus::new();
+        bus.register(handler.clone()).await;
+
+        let event = Event::task_completed_with_output(
+            TaskId::new("echo_task"),
+            DagId::new("pipeline"),
+            Duration::from_millis(50),
+            Some("Hello, World!".to_string()),
+            Some("warning: deprecated".to_string()),
+            Some(0),
+        );
+        bus.emit(event).await;
+
+        let events = handler.events().await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::TaskCompleted {
+                task_id,
+                stdout,
+                stderr,
+                exit_code,
+                ..
+            } => {
+                assert_eq!(task_id.as_str(), "echo_task");
+                assert_eq!(stdout.as_deref(), Some("Hello, World!"));
+                assert_eq!(stderr.as_deref(), Some("warning: deprecated"));
+                assert_eq!(*exit_code, Some(0));
+            }
+            _ => panic!("Expected TaskCompleted event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_task_failed_with_output() {
+        let handler = Arc::new(RecordingHandler::new());
+        let bus = EventBus::new();
+        bus.register(handler.clone()).await;
+
+        let event = Event::task_failed_with_output(
+            TaskId::new("failing_task"),
+            DagId::new("pipeline"),
+            "command failed".to_string(),
+            Some("partial output".to_string()),
+            Some("error: file not found".to_string()),
+            Some(1),
+        );
+        bus.emit(event).await;
+
+        let events = handler.events().await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::TaskFailed {
+                task_id,
+                error,
+                stdout,
+                stderr,
+                exit_code,
+                ..
+            } => {
+                assert_eq!(task_id.as_str(), "failing_task");
+                assert_eq!(error, "command failed");
+                assert_eq!(stdout.as_deref(), Some("partial output"));
+                assert_eq!(stderr.as_deref(), Some("error: file not found"));
+                assert_eq!(*exit_code, Some(1));
+            }
+            _ => panic!("Expected TaskFailed event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_task_completed_without_output() {
+        // Verify that the basic constructor still works with None values
+        let event = Event::task_completed(
+            TaskId::new("task"),
+            DagId::new("dag"),
+            Duration::from_millis(100),
+        );
+
+        match event {
+            Event::TaskCompleted {
+                stdout,
+                stderr,
+                exit_code,
+                ..
+            } => {
+                assert!(stdout.is_none());
+                assert!(stderr.is_none());
+                assert!(exit_code.is_none());
+            }
+            _ => panic!("Expected TaskCompleted event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_task_failed_without_output() {
+        // Verify that the basic constructor still works with None values
+        let event = Event::task_failed(
+            TaskId::new("task"),
+            DagId::new("dag"),
+            "error".to_string(),
+        );
+
+        match event {
+            Event::TaskFailed {
+                stdout,
+                stderr,
+                exit_code,
+                ..
+            } => {
+                assert!(stdout.is_none());
+                assert!(stderr.is_none());
+                assert!(exit_code.is_none());
+            }
+            _ => panic!("Expected TaskFailed event"),
+        }
     }
 }

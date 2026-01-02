@@ -1,17 +1,23 @@
 //! API Sketch: How users will define and run jobs via YAML
 //!
-//! This test demonstrates the intended user experience before we build
-//! the full YAML parsing infrastructure. It helps validate our API design.
+//! This test demonstrates the actual user experience using petit's
+//! YAML configuration and execution infrastructure.
 
-use petit::{DagBuilder, Environment, Task, TaskContext, TaskError, TaskId};
+use petit::{
+    CommandTask, DagBuilder, DagExecutor, Environment, Job, JobBuilder, Schedule, Task,
+    TaskCondition, TaskContext, TaskError, TaskExecutor, TaskId, YamlLoader,
+};
 use async_trait::async_trait;
-use std::sync::Arc;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 
-/// This is what a user's YAML job definition would look like:
+/// This is what a user's YAML job definition looks like:
 ///
 /// ```yaml
 /// # jobs/etl_pipeline.yaml
-/// name: etl_pipeline
+/// id: etl_pipeline
+/// name: ETL Pipeline
 /// schedule: "0 0 2 * * *"  # 2 AM daily
 ///
 /// # Job-level environment (inherited by all tasks)
@@ -25,55 +31,53 @@ use std::sync::Arc;
 ///   output_path: /data/processed
 ///
 /// tasks:
-///   extract:
+///   - id: extract
 ///     type: command
-///     program: python
-///     args: ["scripts/extract.py", "--input", "${config.input_path}"]
+///     command: python
+///     args: ["scripts/extract.py", "--input", "/data/raw"]
 ///     environment:
 ///       DATABASE_URL: postgres://localhost/source
 ///       BATCH_SIZE: "1000"
 ///     retry:
 ///       max_attempts: 3
-///       delay_seconds: 60
+///       delay_secs: 60
 ///
-///   transform:
+///   - id: transform
 ///     type: command
-///     program: python
+///     command: python
 ///     args: ["scripts/transform.py"]
 ///     depends_on: [extract]
 ///     environment:
 ///       SPARK_MASTER: local[4]
 ///
-///   validate:
+///   - id: validate
 ///     type: command
-///     program: python
+///     command: python
 ///     args: ["scripts/validate.py"]
 ///     depends_on: [transform]
 ///     condition: all_success
 ///
-///   notify_success:
+///   - id: notify_success
 ///     type: command
-///     program: bash
+///     command: bash
 ///     args: ["-c", "echo 'Pipeline completed!'"]
 ///     depends_on: [validate]
 ///     condition: all_success
-///     environment:
-///       SLACK_WEBHOOK: https://hooks.slack.com/...
 ///
-///   notify_failure:
+///   - id: notify_failure
 ///     type: command
-///     program: bash
+///     command: bash
 ///     args: ["-c", "echo 'Pipeline failed!'"]
 ///     depends_on: [validate]
 ///     condition: on_failure
 /// ```
 
-// For now, we simulate what the YAML loader would create
-// using our current Rust API
-
+// A simple mock task for testing DAG construction without running commands
 struct MockCommandTask {
     name: String,
+    #[allow(dead_code)]
     program: String,
+    #[allow(dead_code)]
     args: Vec<String>,
     env: Environment,
 }
@@ -105,20 +109,21 @@ impl Task for MockCommandTask {
     }
 
     async fn execute(&self, ctx: &mut TaskContext) -> Result<(), TaskError> {
-        // In real implementation, this would run the command with self.env
-        println!("Running: {} {:?}", self.program, self.args);
-        println!("Environment: {:?}", self.env.vars());
-
         // Tasks can write outputs for downstream tasks
         ctx.outputs.set("exit_code", 0)?;
         ctx.outputs.set("completed", true)?;
-
         Ok(())
     }
 
     fn environment(&self) -> Environment {
         self.env.clone()
     }
+}
+
+fn create_test_context() -> TaskContext {
+    let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
+    let config = Arc::new(HashMap::new());
+    TaskContext::new(store, TaskId::new("test"), config)
 }
 
 #[test]
@@ -169,12 +174,7 @@ fn test_task_with_environment() {
         .with_var("API_KEY", "secret123")
         .with_var("LOG_LEVEL", "debug");
 
-    let task = MockCommandTask::with_env(
-        "db_task",
-        "python",
-        vec!["query.py"],
-        task_env,
-    );
+    let task = MockCommandTask::with_env("db_task", "python", vec!["query.py"], task_env);
 
     let env = task.environment();
 
@@ -192,15 +192,18 @@ fn test_environment_merging() {
 
     // Task-level environment (from YAML task definition)
     let task_env = Environment::new()
-        .with_var("LOG_LEVEL", "debug")  // Override job-level
+        .with_var("LOG_LEVEL", "debug") // Override job-level
         .with_var("DATABASE_URL", "postgres://localhost/db");
 
     // When executing, job env is merged with task env (task wins)
     let merged = job_env.merged_with(&task_env);
 
-    assert_eq!(merged.get("LOG_LEVEL"), Some("debug"));  // Task override
-    assert_eq!(merged.get("DATA_DIR"), Some("/data"));    // From job
-    assert_eq!(merged.get("DATABASE_URL"), Some("postgres://localhost/db")); // From task
+    assert_eq!(merged.get("LOG_LEVEL"), Some("debug")); // Task override
+    assert_eq!(merged.get("DATA_DIR"), Some("/data")); // From job
+    assert_eq!(
+        merged.get("DATABASE_URL"),
+        Some("postgres://localhost/db")
+    ); // From task
 }
 
 #[test]
@@ -213,8 +216,6 @@ fn test_ready_tasks_simulation() {
         .add_task_with_deps(MockCommandTask::new("c", "echo", vec!["c"]), &["a", "b"])
         .build()
         .unwrap();
-
-    use std::collections::HashSet;
 
     // Initially, a and b are ready (no dependencies)
     let ready = dag.get_ready_tasks(&HashSet::new());
@@ -238,34 +239,24 @@ fn test_ready_tasks_simulation() {
 async fn test_task_context_data_flow() {
     // Demonstrate how data flows between tasks via context
 
-    use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
-    use serde_json::Value;
-
     // Shared context store (this is what the executor manages)
     let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
     let config = Arc::new(HashMap::new());
 
     // Simulate extract task writing output
     {
-        let ctx = TaskContext::new(
-            store.clone(),
-            TaskId::new("extract"),
-            config.clone(),
-        );
+        let ctx = TaskContext::new(store.clone(), TaskId::new("extract"), config.clone());
 
         // Extract task writes row count
         ctx.outputs.set("row_count", 1000).unwrap();
-        ctx.outputs.set("output_path", "/tmp/extracted.parquet").unwrap();
+        ctx.outputs
+            .set("output_path", "/tmp/extracted.parquet")
+            .unwrap();
     }
 
     // Simulate transform task reading from extract
     {
-        let ctx = TaskContext::new(
-            store.clone(),
-            TaskId::new("transform"),
-            config.clone(),
-        );
+        let ctx = TaskContext::new(store.clone(), TaskId::new("transform"), config.clone());
 
         // Transform reads extract's output
         let row_count: i32 = ctx.inputs.get("extract.row_count").unwrap();
@@ -280,11 +271,7 @@ async fn test_task_context_data_flow() {
 
     // Simulate load task reading from transform
     {
-        let ctx = TaskContext::new(
-            store.clone(),
-            TaskId::new("load"),
-            config,
-        );
+        let ctx = TaskContext::new(store.clone(), TaskId::new("load"), config);
 
         let transformed: i32 = ctx.inputs.get("transform.transformed_rows").unwrap();
         assert_eq!(transformed, 2000);
@@ -295,9 +282,7 @@ async fn test_task_context_data_flow() {
 fn test_config_access() {
     // Demonstrate how job-level config is accessed by tasks
 
-    use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
-    use serde_json::{json, Value};
+    use serde_json::json;
 
     let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
 
@@ -307,11 +292,7 @@ fn test_config_access() {
     config.insert("output_path".to_string(), json!("/data/processed"));
     config.insert("batch_size".to_string(), json!(1000));
 
-    let ctx = TaskContext::new(
-        store,
-        TaskId::new("my_task"),
-        Arc::new(config),
-    );
+    let ctx = TaskContext::new(store, TaskId::new("my_task"), Arc::new(config));
 
     // Tasks can read config values
     let input: String = ctx.get_config("input_path").unwrap();
@@ -329,39 +310,45 @@ fn test_config_access() {
 ///
 /// ```yaml
 /// tasks:
-///   fetch_users:
+///   - id: fetch_users
 ///     type: command
-///     program: python
+///     command: python
 ///     args: ["fetch_users.py"]
 ///     environment:
 ///       DB_HOST: users-db.internal
 ///
-///   fetch_orders:
+///   - id: fetch_orders
 ///     type: command
-///     program: python
+///     command: python
 ///     args: ["fetch_orders.py"]
 ///     environment:
 ///       DB_HOST: orders-db.internal
 ///
-///   join_data:
+///   - id: join_data
 ///     type: command
-///     program: python
+///     command: python
 ///     args: ["join.py"]
-///     depends_on: [fetch_users, fetch_orders]  # waits for both
+///     depends_on: [fetch_users, fetch_orders]
 ///
-///   generate_report:
+///   - id: generate_report
 ///     type: command
-///     program: python
+///     command: python
 ///     args: ["report.py"]
 ///     depends_on: [join_data]
-///     environment:
-///       OUTPUT_FORMAT: pdf
 /// ```
 #[test]
 fn test_diamond_dependency() {
     let dag = DagBuilder::new("report", "Report Pipeline")
-        .add_task(MockCommandTask::new("fetch_users", "python", vec!["fetch_users.py"]))
-        .add_task(MockCommandTask::new("fetch_orders", "python", vec!["fetch_orders.py"]))
+        .add_task(MockCommandTask::new(
+            "fetch_users",
+            "python",
+            vec!["fetch_users.py"],
+        ))
+        .add_task(MockCommandTask::new(
+            "fetch_orders",
+            "python",
+            vec!["fetch_orders.py"],
+        ))
         .add_task_with_deps(
             MockCommandTask::new("join_data", "python", vec!["join.py"]),
             &["fetch_users", "fetch_orders"],
@@ -376,12 +363,355 @@ fn test_diamond_dependency() {
     let order = dag.topological_sort().unwrap();
 
     // fetch_users and fetch_orders can run in parallel (both before join)
-    let join_pos = order.iter().position(|id| id.as_str() == "join_data").unwrap();
-    let users_pos = order.iter().position(|id| id.as_str() == "fetch_users").unwrap();
-    let orders_pos = order.iter().position(|id| id.as_str() == "fetch_orders").unwrap();
-    let report_pos = order.iter().position(|id| id.as_str() == "generate_report").unwrap();
+    let join_pos = order
+        .iter()
+        .position(|id| id.as_str() == "join_data")
+        .unwrap();
+    let users_pos = order
+        .iter()
+        .position(|id| id.as_str() == "fetch_users")
+        .unwrap();
+    let orders_pos = order
+        .iter()
+        .position(|id| id.as_str() == "fetch_orders")
+        .unwrap();
+    let report_pos = order
+        .iter()
+        .position(|id| id.as_str() == "generate_report")
+        .unwrap();
 
     assert!(users_pos < join_pos);
     assert!(orders_pos < join_pos);
     assert!(join_pos < report_pos);
+}
+
+// ============================================================================
+// Tests demonstrating the actual implementation
+// ============================================================================
+
+#[test]
+fn test_command_task_builder() {
+    // Demonstrate the actual CommandTask builder API
+    let task = CommandTask::builder("echo")
+        .name("my_task")
+        .arg("hello")
+        .arg("world")
+        .env("MY_VAR", "my_value")
+        .working_dir("/tmp")
+        .build();
+
+    assert_eq!(task.name(), "my_task");
+    assert_eq!(task.environment().get("MY_VAR"), Some("my_value"));
+}
+
+#[tokio::test]
+async fn test_real_command_execution() {
+    // Demonstrate executing a real command task
+    let task: Arc<dyn Task> = Arc::new(
+        CommandTask::builder("echo")
+            .name("echo_test")
+            .arg("Hello from petit!")
+            .build(),
+    );
+
+    let dag = DagBuilder::new("simple", "Simple DAG")
+        .add_task(task)
+        .build()
+        .unwrap();
+
+    // Execute the DAG
+    let executor = DagExecutor::with_concurrency(4);
+    let mut ctx = create_test_context();
+    let result = executor.execute(&dag, &mut ctx).await;
+
+    assert!(result.success);
+    assert_eq!(result.completed_count(), 1);
+    assert_eq!(result.failed_count(), 0);
+}
+
+#[tokio::test]
+async fn test_dag_executor_with_dependencies() {
+    // Execute a DAG with dependencies using real commands
+    let dag = DagBuilder::new("pipeline", "Pipeline with deps")
+        .add_task(Arc::new(
+            CommandTask::builder("echo")
+                .name("step1")
+                .arg("Step 1")
+                .build(),
+        ))
+        .add_task_with_deps(
+            Arc::new(
+                CommandTask::builder("echo")
+                    .name("step2")
+                    .arg("Step 2")
+                    .build(),
+            ),
+            &["step1"],
+        )
+        .add_task_with_deps(
+            Arc::new(
+                CommandTask::builder("echo")
+                    .name("step3")
+                    .arg("Step 3")
+                    .build(),
+            ),
+            &["step2"],
+        )
+        .build()
+        .unwrap();
+
+    let executor = DagExecutor::with_concurrency(2);
+    let mut ctx = create_test_context();
+    let result = executor.execute(&dag, &mut ctx).await;
+
+    assert!(result.success);
+    assert_eq!(result.completed_count(), 3);
+}
+
+#[tokio::test]
+async fn test_parallel_execution() {
+    // Tasks without dependencies should run in parallel
+    let dag = DagBuilder::new("parallel", "Parallel tasks")
+        .add_task(Arc::new(
+            CommandTask::builder("sleep")
+                .name("task_a")
+                .arg("0.1")
+                .build(),
+        ))
+        .add_task(Arc::new(
+            CommandTask::builder("sleep")
+                .name("task_b")
+                .arg("0.1")
+                .build(),
+        ))
+        .add_task(Arc::new(
+            CommandTask::builder("sleep")
+                .name("task_c")
+                .arg("0.1")
+                .build(),
+        ))
+        .build()
+        .unwrap();
+
+    let start = std::time::Instant::now();
+    let executor = DagExecutor::with_concurrency(3);
+    let mut ctx = create_test_context();
+    let result = executor.execute(&dag, &mut ctx).await;
+    let elapsed = start.elapsed();
+
+    assert!(result.success);
+    // If run in parallel, should take ~100ms, not ~300ms
+    assert!(elapsed.as_millis() < 250, "Tasks should run in parallel");
+}
+
+#[test]
+fn test_yaml_loading() {
+    // Test loading a job from YAML configuration
+    let yaml = r#"
+id: test_job
+name: Test Job
+schedule: "0 0 * * * *"
+
+tasks:
+  - id: greet
+    type: command
+    command: echo
+    args: ["Hello, World!"]
+    environment:
+      GREETING: Hello
+"#;
+
+    let job_config = YamlLoader::parse_job_config(yaml).expect("Should parse YAML");
+
+    assert_eq!(job_config.id, "test_job");
+    assert_eq!(job_config.name, "Test Job");
+    assert_eq!(job_config.tasks.len(), 1);
+}
+
+#[test]
+fn test_job_builder_api() {
+    // Demonstrate the Job builder API for programmatic job creation
+    let dag = DagBuilder::new("my_dag", "My DAG")
+        .add_task(Arc::new(
+            CommandTask::builder("echo").name("task1").arg("test").build(),
+        ))
+        .build()
+        .unwrap();
+
+    let job = JobBuilder::new("my_job", "My Job")
+        .dag(dag)
+        .schedule(Schedule::new("0 */5 * * * *").unwrap()) // Every 5 minutes
+        .config("job_var", "value")
+        .build()
+        .unwrap();
+
+    assert_eq!(job.id().as_str(), "my_job");
+    assert_eq!(job.name(), "My Job");
+}
+
+#[test]
+fn test_schedule_parsing() {
+    // Demonstrate cron schedule parsing
+    let schedule = Schedule::new("0 30 9 * * MON-FRI").unwrap();
+    assert!(schedule.next().is_ok());
+
+    // Every minute
+    let every_min = Schedule::new("0 * * * * *").unwrap();
+    assert!(every_min.next().is_ok());
+
+    // Daily at midnight
+    let daily = Schedule::new("0 0 0 * * *").unwrap();
+    assert!(daily.next().is_ok());
+}
+
+#[tokio::test]
+async fn test_failed_task_handling() {
+    // Test that DAG execution handles failures correctly
+    // Note: Must use AllSuccess condition for dependent task to be skipped on upstream failure
+    // (the default condition is Always, which runs regardless of upstream status)
+    let dag = DagBuilder::new("failing", "Failing pipeline")
+        .add_task(Arc::new(
+            CommandTask::builder("false") // 'false' command returns exit code 1
+                .name("will_fail")
+                .build(),
+        ))
+        .add_task_with_deps_and_condition(
+            Arc::new(
+                CommandTask::builder("echo")
+                    .name("never_runs")
+                    .arg("This should not run")
+                    .build(),
+            ),
+            &["will_fail"],
+            TaskCondition::AllSuccess, // Skip if upstream fails
+        )
+        .build()
+        .unwrap();
+
+    let executor = DagExecutor::with_concurrency(2);
+    let mut ctx = create_test_context();
+    let result = executor.execute(&dag, &mut ctx).await;
+
+    assert!(!result.success);
+    assert_eq!(result.failed_count(), 1);
+    assert_eq!(result.skipped_count(), 1);
+}
+
+#[tokio::test]
+async fn test_task_output_capture() {
+    // Demonstrate capturing task output
+    let dag = DagBuilder::new("output", "Output capture test")
+        .add_task(Arc::new(
+            CommandTask::builder("echo")
+                .name("producer")
+                .arg("Hello from producer")
+                .build(),
+        ))
+        .build()
+        .unwrap();
+
+    let executor = DagExecutor::with_concurrency(1);
+    let mut ctx = create_test_context();
+    let result = executor.execute(&dag, &mut ctx).await;
+
+    assert!(result.success);
+
+    // Check the task result
+    let task_result = result.get_task_result(&TaskId::new("producer")).unwrap();
+    assert!(task_result.success);
+
+    // stdout is captured in context, check it
+    let stdout: String = ctx.inputs.get("producer.stdout").unwrap();
+    assert!(stdout.contains("Hello from producer"));
+}
+
+#[tokio::test]
+async fn test_task_executor_directly() {
+    // Demonstrate using TaskExecutor directly
+    let executor = TaskExecutor::new(4);
+    let task = CommandTask::builder("echo")
+        .name("direct_task")
+        .arg("direct execution")
+        .build();
+
+    let mut ctx = create_test_context();
+    let result = executor.execute(&task, &mut ctx).await;
+
+    assert!(result.success);
+    assert_eq!(result.attempts, 1);
+}
+
+#[test]
+fn test_job_with_config() {
+    // Demonstrate job-level configuration
+    use serde_json::json;
+
+    let dag = DagBuilder::new("config_dag", "Config DAG")
+        .add_task(MockCommandTask::new("task1", "echo", vec!["test"]))
+        .build()
+        .unwrap();
+
+    let job = Job::new("config_job", "Config Job", dag)
+        .with_config_value("batch_size", json!(1000))
+        .with_config_value("output_dir", json!("/data/output"));
+
+    assert_eq!(job.get_config::<i32>("batch_size"), Some(1000));
+    assert_eq!(
+        job.get_config::<String>("output_dir"),
+        Some("/data/output".to_string())
+    );
+}
+
+#[test]
+fn test_yaml_with_dependencies() {
+    // Test YAML parsing with task dependencies
+    let yaml = r#"
+id: pipeline
+name: Data Pipeline
+tasks:
+  - id: extract
+    type: command
+    command: python
+    args: ["extract.py"]
+  - id: transform
+    type: command
+    command: python
+    args: ["transform.py"]
+    depends_on: [extract]
+  - id: load
+    type: command
+    command: python
+    args: ["load.py"]
+    depends_on: [transform]
+"#;
+
+    let job_config = YamlLoader::parse_job_config(yaml).expect("Should parse YAML");
+
+    assert_eq!(job_config.tasks.len(), 3);
+    assert_eq!(job_config.tasks[0].depends_on.len(), 0);
+    assert_eq!(job_config.tasks[1].depends_on, vec!["extract"]);
+    assert_eq!(job_config.tasks[2].depends_on, vec!["transform"]);
+}
+
+#[test]
+fn test_yaml_with_retry_config() {
+    // Test YAML parsing with retry configuration
+    let yaml = r#"
+id: retry_job
+name: Retry Job
+tasks:
+  - id: flaky_task
+    type: command
+    command: ./flaky.sh
+    retry:
+      max_attempts: 5
+      delay_secs: 30
+      condition: always
+"#;
+
+    let job_config = YamlLoader::parse_job_config(yaml).expect("Should parse YAML");
+
+    let retry = job_config.tasks[0].retry.as_ref().unwrap();
+    assert_eq!(retry.max_attempts, 5);
+    assert_eq!(retry.delay_secs, 30);
 }

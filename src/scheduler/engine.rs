@@ -503,8 +503,10 @@ impl<S: Storage + 'static> Scheduler<S> {
             let config = Arc::new(job.config().clone());
             let mut ctx = TaskContext::new(store, TaskId::new("job"), config);
 
-            // Execute the DAG
-            let result = dag_executor.execute(job.dag(), &mut ctx).await;
+            // Execute the DAG with event emission
+            let result = dag_executor
+                .execute_with_events(job.dag(), &mut ctx, Some(event_bus.clone()))
+                .await;
 
             // Update run status
             let duration = start.elapsed();

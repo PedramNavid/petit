@@ -30,7 +30,8 @@ pub use storage::{
 pub use storage::SqliteStorage;
 
 pub use config::{
-    ConfigError, GlobalConfig, JobConfig, RetryConfig, ScheduleConfig, TaskConfig, YamlLoader,
+    load_jobs_from_directory, ConfigError, GlobalConfig, JobConfig, JobConfigBuilder, RetryConfig,
+    ScheduleConfig, TaskConfig, YamlLoader,
 };
 
 pub use testing::{
