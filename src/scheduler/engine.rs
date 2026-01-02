@@ -126,8 +126,6 @@ impl SchedulerHandle {
             .await
             .map_err(|_| SchedulerError::ChannelError("failed to receive pause response".into()))?;
 
-        let mut state = self.state.write().await;
-        *state = SchedulerState::Paused;
         Ok(())
     }
 
@@ -145,8 +143,6 @@ impl SchedulerHandle {
             .await
             .map_err(|_| SchedulerError::ChannelError("failed to receive resume response".into()))?;
 
-        let mut state = self.state.write().await;
-        *state = SchedulerState::Running;
         Ok(())
     }
 
@@ -166,8 +162,6 @@ impl SchedulerHandle {
                 SchedulerError::ChannelError("failed to receive shutdown response".into())
             })?;
 
-        let mut state = self.state.write().await;
-        *state = SchedulerState::Stopped;
         Ok(())
     }
 
