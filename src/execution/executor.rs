@@ -93,90 +93,48 @@ impl TaskExecutor {
     /// 2. Execute the task
     /// 3. Retry on failure according to the task's retry policy
     /// 4. Return the result with attempt count and duration
-    pub async fn execute(
-        &self,
-        task: &dyn Task,
-        ctx: &mut TaskContext,
-    ) -> TaskResult {
-        let task_id = TaskId::new(task.name());
-        let start_time = Instant::now();
-        let retry_policy = task.retry_policy();
-
+    pub async fn execute(&self, task: &dyn Task, ctx: &mut TaskContext) -> TaskResult {
         // Acquire semaphore permit for concurrency control
         let _permit = self.semaphore.acquire().await.expect("semaphore closed");
 
-        let mut attempts = 0u32;
-
-        // First attempt + retries
-        let max_attempts = retry_policy.max_attempts + 1; // +1 for initial attempt
-
-        loop {
-            attempts += 1;
-
-            match task.execute(ctx).await {
-                Ok(()) => {
-                    return TaskResult::success(task_id, attempts, start_time.elapsed());
-                }
-                Err(err) => {
-                    // Check if we should retry
-                    let should_retry = attempts < max_attempts && match retry_policy.retry_on {
-                        RetryCondition::Always => true,
-                        RetryCondition::TransientOnly => err.is_transient(),
-                        RetryCondition::Never => false,
-                    };
-
-                    if should_retry {
-                        // Wait before retrying
-                        sleep(retry_policy.delay).await;
-                    } else {
-                        // No more retries, return failure
-                        return TaskResult::failure(
-                            task_id,
-                            attempts,
-                            start_time.elapsed(),
-                            err.to_string(),
-                        );
-                    }
-                }
-            }
-        }
+        Self::execute_with_retry(task, ctx).await
     }
 
     /// Execute a task without acquiring a semaphore permit.
     ///
     /// Use this when you're managing concurrency externally or for testing.
-    pub async fn execute_without_permit(
-        &self,
-        task: &dyn Task,
-        ctx: &mut TaskContext,
-    ) -> TaskResult {
+    pub async fn execute_without_permit(&self, task: &dyn Task, ctx: &mut TaskContext) -> TaskResult {
+        Self::execute_with_retry(task, ctx).await
+    }
+
+    /// Core retry loop used by both execute methods.
+    async fn execute_with_retry(task: &dyn Task, ctx: &mut TaskContext) -> TaskResult {
         let task_id = TaskId::new(task.name());
         let start_time = Instant::now();
         let retry_policy = task.retry_policy();
 
-        let mut attempts = 0u32;
+        // max_attempts includes the initial attempt + retries
         let max_attempts = retry_policy.max_attempts + 1;
 
-        loop {
-            attempts += 1;
-
+        for attempt in 1..=max_attempts {
             match task.execute(ctx).await {
                 Ok(()) => {
-                    return TaskResult::success(task_id, attempts, start_time.elapsed());
+                    return TaskResult::success(task_id, attempt, start_time.elapsed());
                 }
                 Err(err) => {
-                    let should_retry = attempts < max_attempts && match retry_policy.retry_on {
-                        RetryCondition::Always => true,
-                        RetryCondition::TransientOnly => err.is_transient(),
-                        RetryCondition::Never => false,
-                    };
+                    let can_retry = attempt < max_attempts
+                        && match retry_policy.retry_on {
+                            RetryCondition::Always => true,
+                            RetryCondition::TransientOnly => err.is_transient(),
+                            RetryCondition::Never => false,
+                        };
 
-                    if should_retry {
+                    if can_retry {
                         sleep(retry_policy.delay).await;
                     } else {
                         return TaskResult::failure(
                             task_id,
-                            attempts,
+                            attempt,
                             start_time.elapsed(),
                             err.to_string(),
                         );
@@ -184,6 +142,10 @@ impl TaskExecutor {
                 }
             }
         }
+
+        // This is unreachable because the loop always returns, but the compiler
+        // doesn't know that max_attempts >= 1
+        unreachable!("retry loop should always return")
     }
 }
 
