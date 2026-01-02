@@ -20,3 +20,6 @@ pub use storage::{
     InMemoryStorage, RunStatus, Storage, StorageError, StoredJob, StoredRun, StoredTaskState,
     TaskRunStatus,
 };
+
+#[cfg(feature = "sqlite")]
+pub use storage::SqliteStorage;

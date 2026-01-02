@@ -4,8 +4,12 @@
 //! pluggable backends (in-memory, SQLite, etc.).
 
 mod memory;
+#[cfg(any(feature = "sqlite", test))]
+mod sqlite;
 
 pub use memory::InMemoryStorage;
+#[cfg(any(feature = "sqlite", test))]
+pub use sqlite::SqliteStorage;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
