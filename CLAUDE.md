@@ -32,6 +32,12 @@ src/
 
 **Test-driven development**: Tests are written first as executable documentation defining the API contract. Implementation follows to make tests pass.
 
+**Git workflow**:
+- Always work on feature branches, never commit directly to `main`
+- Branch naming: `phase-N-description` (e.g., `phase-1-core-types`)
+- Create a PR for every feature/phase
+- Merge to `main` only after review
+
 See `PLAN.md` for the phased implementation plan.
 See `SPEC.md` for detailed technical specification.
 
