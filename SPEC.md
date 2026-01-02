@@ -11,7 +11,7 @@ Petit is a lightweight, memory-efficient task orchestrator written in Rust. It p
 A Task is the fundamental unit of work. Each task has:
 
 - **Compute Function**: Either a Rust trait implementation or an external command
-- **Resource Requirements**: Abstract slots/tokens and system resource constraints
+- **Environment**: Key-value environment variables passed during execution (similar to Docker/Kubernetes)
 - **Retry Policy**: Fixed delay retry with configurable attempts and interval
 - **Metadata**: Name, description, tags for organization
 
@@ -24,9 +24,9 @@ pub trait Task: Send + Sync {
     /// Execute the task with the given context
     async fn execute(&self, ctx: &mut TaskContext) -> Result<(), TaskError>;
 
-    /// Resource requirements for this task
-    fn resources(&self) -> ResourceRequirements {
-        ResourceRequirements::default()
+    /// Environment variables for this task
+    fn environment(&self) -> Environment {
+        Environment::default()
     }
 
     /// Retry policy for this task
@@ -45,34 +45,35 @@ pub struct CommandTask {
     name: String,
     program: String,
     args: Vec<String>,
-    env: HashMap<String, String>,
+    environment: Environment,
     working_dir: Option<PathBuf>,
-    resources: ResourceRequirements,
     retry_policy: RetryPolicy,
 }
 ```
 
-### Resource Requirements
+### Environment
 
-Tasks declare both abstract and system resources:
+Tasks receive environment variables for configuration, credentials, and runtime values:
 
 ```rust
-pub struct ResourceRequirements {
-    /// Abstract named resource pools (e.g., "gpu": 2, "db_conn": 1)
-    pub slots: HashMap<String, u32>,
-
-    /// System resource constraints
-    pub system: SystemResources,
+pub struct Environment {
+    /// Environment variables as key-value pairs
+    vars: HashMap<String, String>,
 }
 
-pub struct SystemResources {
-    /// CPU cores (can be fractional, e.g., 0.5)
-    pub cpu_cores: Option<f32>,
+impl Environment {
+    /// Create an empty environment
+    pub fn new() -> Self;
 
-    /// Memory limit in bytes
-    pub memory_bytes: Option<u64>,
+    /// Builder: add an environment variable
+    pub fn with_var(self, key: &str, value: &str) -> Self;
+
+    /// Merge another environment (other values override)
+    pub fn merged_with(&self, other: &Environment) -> Self;
 }
 ```
+
+Environment variables cascade: job-level environment is merged with task-level environment, with task values taking precedence.
 
 ### Retry Policy
 
@@ -213,9 +214,6 @@ pub struct Executor {
     /// Global concurrency limit
     max_concurrency: usize,
 
-    /// Resource pool manager
-    resource_manager: ResourceManager,
-
     /// Task execution runtime
     runtime: tokio::runtime::Handle,
 }
@@ -224,8 +222,8 @@ impl Executor {
     /// Execute a DAG, respecting dependencies and concurrency limits
     pub async fn execute_dag(&self, dag: &Dag, ctx: ExecutionContext) -> DagResult;
 
-    /// Execute a single task
-    pub async fn execute_task(&self, task: &dyn Task, ctx: TaskContext) -> TaskResult;
+    /// Execute a single task with environment variables
+    pub async fn execute_task(&self, task: &dyn Task, ctx: TaskContext, env: Environment) -> TaskResult;
 }
 ```
 
@@ -233,25 +231,7 @@ impl Executor {
 
 - Global executor concurrency limit
 - Per-job concurrency limit
-- Resource-based scheduling (tasks wait for required resources)
-
-```rust
-pub struct ResourceManager {
-    /// Available resource pools
-    pools: HashMap<String, ResourcePool>,
-
-    /// System resource tracking
-    system: SystemResourceTracker,
-}
-
-impl ResourceManager {
-    /// Attempt to acquire resources, returns guard on success
-    pub async fn acquire(&self, requirements: &ResourceRequirements) -> Option<ResourceGuard>;
-
-    /// Wait until resources are available
-    pub async fn acquire_blocking(&self, requirements: &ResourceRequirements) -> ResourceGuard;
-}
-```
+- Semaphore-based task scheduling
 
 ### Task Context
 
@@ -406,6 +386,11 @@ depends_on:
   - job: data_ingestion
     condition: last_success
 
+# Job-level environment (inherited by all tasks)
+environment:
+  LOG_LEVEL: info
+  DATA_DIR: /var/data
+
 config:
   data_path: /var/data
   output_format: parquet
@@ -415,10 +400,9 @@ tasks:
     type: command
     program: python
     args: ["scripts/extract.py"]
-    env:
+    environment:
       INPUT_PATH: "${config.data_path}/raw"
-    resources:
-      memory_bytes: 2147483648  # 2GB
+      DATABASE_URL: postgres://localhost/source
     retry:
       max_attempts: 3
       delay_seconds: 60
@@ -428,9 +412,8 @@ tasks:
     program: python
     args: ["scripts/transform.py"]
     depends_on: [extract]
-    resources:
-      slots:
-        cpu_intensive: 1
+    environment:
+      SPARK_MASTER: local[4]
 
   load:
     type: command
@@ -438,6 +421,8 @@ tasks:
     args: ["scripts/load.py"]
     depends_on: [transform]
     condition: all_success
+    environment:
+      OUTPUT_FORMAT: parquet
 ```
 
 ### Global Configuration
@@ -447,11 +432,9 @@ tasks:
 executor:
   max_concurrency: 8
 
-resources:
-  pools:
-    gpu: 2
-    db_conn: 10
-    cpu_intensive: 4
+# Global environment inherited by all jobs
+environment:
+  TZ: UTC
 
 storage:
   type: sqlite
@@ -527,15 +510,15 @@ src/
 ├── lib.rs              # Public API
 ├── core/
 │   ├── mod.rs
-│   ├── task.rs         # Task trait, TaskContext
+│   ├── task.rs         # Task trait
+│   ├── context.rs      # TaskContext, key-value store
+│   ├── environment.rs  # Environment variables
 │   ├── dag.rs          # DAG structure, validation
 │   ├── job.rs          # Job definition
 │   └── schedule.rs     # Cron parsing, scheduling
 ├── execution/
 │   ├── mod.rs
-│   ├── executor.rs     # Task execution engine
-│   ├── resource.rs     # Resource management
-│   └── context.rs      # Key-value context store
+│   └── executor.rs     # Task execution engine
 ├── storage/
 │   ├── mod.rs
 │   ├── traits.rs       # Storage trait
@@ -641,9 +624,6 @@ pub enum PetitError {
 
     #[error("Schedule parse error: {0}")]
     Schedule(String),
-
-    #[error("Resource unavailable: {0}")]
-    Resource(String),
 }
 
 #[derive(Debug, thiserror::Error)]

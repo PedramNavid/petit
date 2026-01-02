@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use super::context::TaskContext;
-use super::resource::ResourceRequirements;
+use super::environment::Environment;
 use super::retry::RetryPolicy;
 
 /// Errors that can occur during task execution.
@@ -50,7 +50,7 @@ impl TaskError {
 /// # Example
 ///
 /// ```ignore
-/// use petit::{Task, TaskContext, TaskError, ResourceRequirements, RetryPolicy};
+/// use petit::{Task, TaskContext, TaskError, Environment, RetryPolicy};
 /// use async_trait::async_trait;
 ///
 /// struct MyTask {
@@ -92,11 +92,14 @@ pub trait Task: Send + Sync {
     /// * `Err(TaskError)` - Task failed
     async fn execute(&self, ctx: &mut TaskContext) -> Result<(), TaskError>;
 
-    /// Returns the resource requirements for this task.
+    /// Returns environment variables for this task.
     ///
-    /// Default implementation returns no requirements.
-    fn resources(&self) -> ResourceRequirements {
-        ResourceRequirements::default()
+    /// These will be merged with job-level environment and passed
+    /// to the task during execution (e.g., to a subprocess).
+    ///
+    /// Default implementation returns an empty environment.
+    fn environment(&self) -> Environment {
+        Environment::default()
     }
 
     /// Returns the retry policy for this task.
@@ -161,13 +164,13 @@ mod tests {
         }
     }
 
-    // A task with custom resource requirements
-    struct ResourceHeavyTask {
+    // A task with custom environment
+    struct TaskWithEnv {
         name: String,
     }
 
     #[async_trait]
-    impl Task for ResourceHeavyTask {
+    impl Task for TaskWithEnv {
         fn name(&self) -> &str {
             &self.name
         }
@@ -176,11 +179,10 @@ mod tests {
             Ok(())
         }
 
-        fn resources(&self) -> ResourceRequirements {
-            ResourceRequirements::none()
-                .with_slot("gpu", 2)
-                .with_cpu(4.0)
-                .with_memory(1024 * 1024 * 1024) // 1GB
+        fn environment(&self) -> Environment {
+            Environment::new()
+                .with_var("DATABASE_URL", "postgres://localhost/db")
+                .with_var("API_KEY", "secret123")
         }
     }
 
@@ -300,27 +302,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_resource_requirements() {
+    async fn test_default_environment() {
         let task = SuccessTask {
             name: "simple".to_string(),
         };
 
-        let resources = task.resources();
+        let env = task.environment();
 
-        assert!(resources.is_empty());
+        assert!(env.is_empty());
     }
 
     #[tokio::test]
-    async fn test_custom_resource_requirements() {
-        let task = ResourceHeavyTask {
-            name: "heavy".to_string(),
+    async fn test_custom_environment() {
+        let task = TaskWithEnv {
+            name: "with_env".to_string(),
         };
 
-        let resources = task.resources();
+        let env = task.environment();
 
-        assert_eq!(resources.slots.get("gpu"), Some(&2));
-        assert_eq!(resources.system.cpu_cores, Some(4.0));
-        assert_eq!(resources.system.memory_bytes, Some(1_073_741_824));
+        assert_eq!(env.get("DATABASE_URL"), Some("postgres://localhost/db"));
+        assert_eq!(env.get("API_KEY"), Some("secret123"));
     }
 
     #[tokio::test]
