@@ -32,6 +32,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-test = "0.4"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 tempfile = "3"
+libc = "0.2.178"
 
 [features]
 default = []
