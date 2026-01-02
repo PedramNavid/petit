@@ -1,3 +1,4 @@
+pub mod config;
 pub mod core;
 pub mod events;
 pub mod execution;
@@ -25,3 +26,7 @@ pub use storage::{
 
 #[cfg(feature = "sqlite")]
 pub use storage::SqliteStorage;
+
+pub use config::{
+    ConfigError, GlobalConfig, JobConfig, RetryConfig, ScheduleConfig, TaskConfig, YamlLoader,
+};

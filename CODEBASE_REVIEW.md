@@ -1,0 +1,8 @@
+# Codebase Review
+
+- DAG executor marks any skipped task as a DAG failure (`src/execution/dag_executor.rs:208-220`). DAGs with intentional skips (e.g., conditional/on_failure paths) are reported as failed even when everything behaved as expected. Overall success should not depend on the presence of skipped tasks.
+- Shared context merging clones the entire store per task and writes it back wholesale (`src/execution/dag_executor.rs:164-177`). Concurrent tasks can overwrite each other with stale data; only task-local writes should be merged or keys should be namespaced to avoid cross-task clobbering.
+- Failure conditions ignore skipped dependencies (`src/execution/dag_executor.rs:286-296`): downstream `OnFailure` tasks won’t run when an upstream was skipped due to failure, silently dropping intended error-handling paths.
+- Interval parsing accepts malformed inputs and can panic on large durations (`src/core/schedule.rs:126-155,204,237`). It drops trailing digits without error (e.g., `1h30`), and `chrono::Duration::from_std` is unwrapped, risking panic. Parsing should reject leftover input and handle conversion failures.
+- Deserialized schedules remain unparsed (`src/core/schedule.rs:185-208,266-274`): `schedule_type` is skipped during serde, so `next()` on a deserialized schedule returns “schedule not parsed”. Implement custom `Deserialize` to re-parse the expression.
+- Command task captures full stdout/stderr into shared context without bounds or redaction (`src/execution/command.rs:116-136`). Large outputs can exhaust memory, and secrets leak downstream; add size limits or opt-in capture.
