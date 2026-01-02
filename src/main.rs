@@ -1,12 +1,12 @@
-//! Petit - A minimal, lightweight task orchestrator.
+//! petit - A minimal, lightweight task orchestrator.
 //!
 //! Usage:
-//!   petit run <jobs-dir>     Run the scheduler with jobs from the specified directory
-//!   petit validate <jobs-dir> Validate job configurations without running
-//!   petit list <jobs-dir>    List all jobs in the directory
+//!   pt run <jobs-dir>     Run the scheduler with jobs from the specified directory
+//!   pt validate <jobs-dir> Validate job configurations without running
+//!   pt list <jobs-dir>    List all jobs in the directory
 
 use clap::{Parser, Subcommand};
-use petit::{
+use pt::{
     load_jobs_from_directory, DagExecutor, EventBus, EventHandler, InMemoryStorage, Scheduler,
 };
 use std::path::PathBuf;
@@ -14,9 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
-/// Petit - A minimal, lightweight task orchestrator
+/// pt - A minimal, lightweight task orchestrator
 #[derive(Parser)]
-#[command(name = "petit")]
+#[command(name = "pt")]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -75,12 +75,12 @@ struct LoggingHandler;
 
 #[async_trait::async_trait]
 impl EventHandler for LoggingHandler {
-    async fn handle(&self, event: &petit::Event) {
+    async fn handle(&self, event: &pt::Event) {
         match event {
-            petit::Event::JobStarted { job_id, run_id, .. } => {
+            pt::Event::JobStarted { job_id, run_id, .. } => {
                 info!("Job '{}' started (run: {})", job_id, run_id);
             }
-            petit::Event::JobCompleted {
+            pt::Event::JobCompleted {
                 job_id,
                 run_id,
                 success,
@@ -99,10 +99,10 @@ impl EventHandler for LoggingHandler {
                     );
                 }
             }
-            petit::Event::TaskStarted { task_id, .. } => {
+            pt::Event::TaskStarted { task_id, .. } => {
                 info!("  Task '{}' started", task_id);
             }
-            petit::Event::TaskCompleted {
+            pt::Event::TaskCompleted {
                 task_id,
                 stdout,
                 stderr,
@@ -130,7 +130,7 @@ impl EventHandler for LoggingHandler {
                     }
                 }
             }
-            petit::Event::TaskFailed {
+            pt::Event::TaskFailed {
                 task_id,
                 error,
                 stdout,
@@ -354,8 +354,8 @@ struct CompletionWatcher {
 
 #[async_trait::async_trait]
 impl EventHandler for CompletionWatcher {
-    async fn handle(&self, event: &petit::Event) {
-        if let petit::Event::JobCompleted { job_id, .. } = event {
+    async fn handle(&self, event: &pt::Event) {
+        if let pt::Event::JobCompleted { job_id, .. } = event {
             if job_id.as_str() == self.target_job_id {
                 self.completed.notify_one();
             }

@@ -1,15 +1,15 @@
 [package]
-name = "petit"
+name = "pt"
 version = "0.1.0"
 edition = "2024"
 description = "A minimal, lightweight task orchestrator with cron-like scheduling"
 
 [[bin]]
-name = "petit"
+name = "pt"
 path = "src/main.rs"
 
 [lib]
-name = "petit"
+name = "pt"
 path = "src/lib.rs"
 
 [dependencies]
