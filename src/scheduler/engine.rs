@@ -22,6 +22,12 @@ use crate::events::{Event, EventBus, EventHandler};
 use crate::execution::DagExecutor;
 use crate::storage::{RunStatus, Storage, StorageError, StoredJob, StoredRun, StoredTaskState};
 
+/// Buffer size for the command channel between SchedulerHandle and Scheduler.
+const COMMAND_CHANNEL_BUFFER: usize = 32;
+
+/// Number of most recent runs to check when evaluating job dependencies.
+const DEPENDENCY_CHECK_LIMIT: usize = 1;
+
 /// Event handler that updates task states in storage as tasks execute.
 struct TaskStateUpdater<S: Storage> {
     storage: Arc<S>,
@@ -80,14 +86,6 @@ pub enum SchedulerError {
     #[error("job not found: {0}")]
     JobNotFound(String),
 
-    /// Scheduler is already running.
-    #[error("scheduler is already running")]
-    AlreadyRunning,
-
-    /// Scheduler is not running.
-    #[error("scheduler is not running")]
-    NotRunning,
-
     /// Storage error.
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
@@ -139,73 +137,80 @@ pub struct SchedulerHandle {
 }
 
 impl SchedulerHandle {
-    /// Trigger a job manually.
-    pub async fn trigger(&self, job_id: impl Into<JobId>) -> Result<RunId, SchedulerError> {
+    /// Helper to send a command that returns a result and wait for response.
+    async fn send_result_command<T>(
+        &self,
+        build_command: impl FnOnce(oneshot::Sender<Result<T, SchedulerError>>) -> SchedulerCommand,
+        operation: &str,
+    ) -> Result<T, SchedulerError>
+    where
+        T: Send + 'static,
+    {
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
-            .send(SchedulerCommand::Trigger {
-                job_id: job_id.into(),
-                response: response_tx,
-            })
+            .send(build_command(response_tx))
             .await
-            .map_err(|_| SchedulerError::ChannelError("failed to send trigger command".into()))?;
+            .map_err(|_| {
+                SchedulerError::ChannelError(format!("failed to send {} command", operation))
+            })?;
 
         response_rx.await.map_err(|_| {
-            SchedulerError::ChannelError("failed to receive trigger response".into())
+            SchedulerError::ChannelError(format!("failed to receive {} response", operation))
         })?
+    }
+
+    /// Helper to send a command that returns unit and wait for response.
+    async fn send_unit_command(
+        &self,
+        build_command: impl FnOnce(oneshot::Sender<()>) -> SchedulerCommand,
+        operation: &str,
+    ) -> Result<(), SchedulerError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(build_command(response_tx))
+            .await
+            .map_err(|_| {
+                SchedulerError::ChannelError(format!("failed to send {} command", operation))
+            })?;
+
+        response_rx.await.map_err(|_| {
+            SchedulerError::ChannelError(format!("failed to receive {} response", operation))
+        })?;
+
+        Ok(())
+    }
+
+    /// Trigger a job manually.
+    pub async fn trigger(&self, job_id: impl Into<JobId>) -> Result<RunId, SchedulerError> {
+        let job_id = job_id.into();
+        self.send_result_command(
+            |response| SchedulerCommand::Trigger { job_id, response },
+            "trigger",
+        )
+        .await
     }
 
     /// Pause the scheduler.
     ///
     /// While paused, scheduled jobs will not be triggered, but manual triggers still work.
     pub async fn pause(&self) -> Result<(), SchedulerError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.command_tx
-            .send(SchedulerCommand::Pause {
-                response: response_tx,
-            })
+        self.send_unit_command(|response| SchedulerCommand::Pause { response }, "pause")
             .await
-            .map_err(|_| SchedulerError::ChannelError("failed to send pause command".into()))?;
-
-        response_rx
-            .await
-            .map_err(|_| SchedulerError::ChannelError("failed to receive pause response".into()))?;
-
-        Ok(())
     }
 
     /// Resume the scheduler after being paused.
     pub async fn resume(&self) -> Result<(), SchedulerError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.command_tx
-            .send(SchedulerCommand::Resume {
-                response: response_tx,
-            })
+        self.send_unit_command(|response| SchedulerCommand::Resume { response }, "resume")
             .await
-            .map_err(|_| SchedulerError::ChannelError("failed to send resume command".into()))?;
-
-        response_rx.await.map_err(|_| {
-            SchedulerError::ChannelError("failed to receive resume response".into())
-        })?;
-
-        Ok(())
     }
 
     /// Shutdown the scheduler.
     pub async fn shutdown(&self) -> Result<(), SchedulerError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.command_tx
-            .send(SchedulerCommand::Shutdown {
-                response: response_tx,
-            })
-            .await
-            .map_err(|_| SchedulerError::ChannelError("failed to send shutdown command".into()))?;
-
-        response_rx.await.map_err(|_| {
-            SchedulerError::ChannelError("failed to receive shutdown response".into())
-        })?;
-
-        Ok(())
+        self.send_unit_command(
+            |response| SchedulerCommand::Shutdown { response },
+            "shutdown",
+        )
+        .await
     }
 
     /// Get the current scheduler state.
@@ -319,7 +324,7 @@ impl<S: Storage + 'static> Scheduler<S> {
         // Sync job definitions to storage so TUI and other tools can see them
         self.sync_jobs_to_storage().await;
 
-        let (command_tx, command_rx) = mpsc::channel(32);
+        let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_BUFFER);
         let state = Arc::new(RwLock::new(SchedulerState::Running));
 
         let handle = SchedulerHandle {
@@ -483,7 +488,11 @@ impl<S: Storage + 'static> Scheduler<S> {
             let dep_job_id = dep.job_id();
 
             // Get the last run of the dependency job
-            let runs = match self.storage.list_runs(dep_job_id, 1).await {
+            let runs = match self
+                .storage
+                .list_runs(dep_job_id, DEPENDENCY_CHECK_LIMIT)
+                .await
+            {
                 Ok(runs) => runs,
                 Err(_) => return false,
             };
