@@ -3,12 +3,10 @@
 //! Tests that verify the system can recover from interruptions
 //! and handle failed runs appropriately.
 
-mod common;
-
+use crate::common::wait_for_run_status;
 use async_trait::async_trait;
-use common::wait_for_run_status;
 use petit::{
-    DagBuilder, InMemoryStorage, Job, JobId, RunId, RunStatus, Scheduler, StoredRun, Task,
+    DagBuilder, InMemoryStorage, Job, JobId, RunId, RunStatus, Scheduler, Storage, StoredRun, Task,
     TaskContext, TaskError,
 };
 use std::sync::Arc;

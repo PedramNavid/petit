@@ -2,10 +2,8 @@
 //!
 //! Tests that verify the full pipeline from job definition to execution.
 
-mod common;
-
+use crate::common::wait_for_run_status;
 use async_trait::async_trait;
-use common::wait_for_run_status;
 use petit::{
     DagBuilder, DagExecutor, Event, EventBus, EventHandler, InMemoryStorage, Job, JobDependency,
     RunStatus, Schedule, Scheduler, Task, TaskCondition, TaskContext, TaskError, TaskId,

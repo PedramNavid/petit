@@ -6,6 +6,8 @@
 //! - Resource contention handling
 //! - HTTP API endpoints
 
+mod common;
+
 mod integration {
     pub mod api;
     pub mod recovery;

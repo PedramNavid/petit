@@ -2,9 +2,7 @@
 //!
 //! These tests verify the HTTP API server starts and responds correctly.
 
-mod common;
-
-use common::wait_for_run_status;
+use crate::common::wait_for_run_status;
 use petit::api::{build_router, create_api_state};
 use petit::core::dag::Dag;
 use petit::core::job::Job;
@@ -22,10 +20,7 @@ use tower::ServiceExt;
 
 /// Create a test API state with a simple job.
 /// Returns both the API state and the storage for testing purposes.
-async fn create_test_state() -> (
-    petit::api::ApiState<InMemoryStorage>,
-    Arc<InMemoryStorage>,
-) {
+async fn create_test_state() -> (petit::api::ApiState<InMemoryStorage>, Arc<InMemoryStorage>) {
     let storage = Arc::new(InMemoryStorage::new());
     let mut scheduler = Scheduler::with_storage(Arc::clone(&storage));
 
@@ -237,7 +232,7 @@ async fn test_list_runs_endpoint() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let run_id_str = json["run_id"].as_str().unwrap();
-    let run_id = RunId::parse(run_id_str).unwrap();
+    let run_id = RunId::from_string(run_id_str).unwrap();
 
     // Wait for the run to be recorded with a status (any status is fine)
     // We just need to ensure it's been persisted to storage
