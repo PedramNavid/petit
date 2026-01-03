@@ -10,7 +10,7 @@ tasks:
     args: ["-s", "-o", "/dev/null", "-w", "%{http_code}", "https://httpbin.org/get"]
     retry:
       max_attempts: 3
-      delay_secs: 5
+      delay: 5s
       condition: always
     environment:
       CHECK_NAME: api_health

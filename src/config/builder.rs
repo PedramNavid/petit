@@ -4,7 +4,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::core::dag::{DagBuilder, TaskCondition};
 use crate::core::environment::Environment;
@@ -85,7 +84,7 @@ impl JobConfigBuilder {
                 command,
                 args,
                 working_dir,
-                timeout_secs,
+                timeout,
             } => {
                 let mut builder = CommandTask::builder(command).name(&config.id);
 
@@ -106,8 +105,8 @@ impl JobConfigBuilder {
                 }
 
                 // Set timeout
-                if let Some(secs) = timeout_secs {
-                    builder = builder.timeout(Duration::from_secs(*secs));
+                if let Some(timeout_duration) = timeout {
+                    builder = builder.timeout(*timeout_duration);
                 }
 
                 // Set retry policy
@@ -153,14 +152,13 @@ impl JobConfigBuilder {
 
     /// Build a RetryPolicy from RetryConfig.
     fn build_retry_policy(config: &super::yaml::RetryConfig) -> RetryPolicy {
-        let delay = Duration::from_secs(config.delay_secs);
         let condition = match config.condition {
             RetryConditionConfig::Always => RetryCondition::Always,
             RetryConditionConfig::TransientOnly => RetryCondition::TransientOnly,
             RetryConditionConfig::Never => RetryCondition::Never,
         };
 
-        RetryPolicy::fixed(config.max_attempts, delay).with_condition(condition)
+        RetryPolicy::fixed(config.max_attempts, config.delay).with_condition(condition)
     }
 
     /// Convert TaskConditionConfig to TaskCondition.
@@ -315,7 +313,7 @@ tasks:
     command: ./flaky.sh
     retry:
       max_attempts: 5
-      delay_secs: 10
+      delay: 10s
       condition: always
 "#;
 

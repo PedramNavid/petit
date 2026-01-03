@@ -129,7 +129,7 @@ tasks:
     condition: all_success
     retry:
       max_attempts: 3
-      delay_secs: 10
+      delay: 10s
       condition: always
 
   - id: notify
@@ -154,7 +154,7 @@ tasks:
 ```yaml
 retry:
   max_attempts: 3 # Number of retries (0 = no retries)
-  delay_secs: 5 # Fixed delay between attempts
+  delay: 5s # Fixed delay between attempts (e.g., "30s", "5m", "1h")
   condition: always # always | transient_only | never
 ```
 

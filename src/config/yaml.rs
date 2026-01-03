@@ -161,8 +161,13 @@ pub enum TaskTypeConfig {
         args: Vec<String>,
         /// Working directory.
         working_dir: Option<String>,
-        /// Timeout in seconds.
-        timeout_secs: Option<u64>,
+        /// Timeout (e.g., "30s", "5m", "1h").
+        #[serde(
+            default,
+            with = "humantime_serde",
+            skip_serializing_if = "Option::is_none"
+        )]
+        timeout: Option<Duration>,
     },
     /// Python script task.
     #[serde(rename = "python")]
@@ -201,8 +206,9 @@ pub enum TaskConditionConfig {
 pub struct RetryConfig {
     /// Maximum number of retry attempts.
     pub max_attempts: u32,
-    /// Delay between retries in seconds.
-    pub delay_secs: u64,
+    /// Delay between retries (e.g., "30s", "5m", "1h").
+    #[serde(with = "humantime_serde")]
+    pub delay: Duration,
     /// Retry condition.
     #[serde(default)]
     pub condition: RetryConditionConfig,
@@ -256,8 +262,9 @@ pub enum JobDependencyConditionConfig {
     LastComplete,
     /// Must have succeeded within time window.
     WithinWindow {
-        /// Time window in seconds.
-        seconds: u64,
+        /// Time window (e.g., "30s", "5m", "1h").
+        #[serde(with = "humantime_serde")]
+        duration: Duration,
     },
 }
 
@@ -341,11 +348,6 @@ impl YamlLoader {
 
         Ok(())
     }
-
-    /// Convert retry config to Duration.
-    pub fn retry_delay(config: &RetryConfig) -> Duration {
-        Duration::from_secs(config.delay_secs)
-    }
 }
 
 #[cfg(test)]
@@ -388,7 +390,7 @@ tasks:
       DB_HOST: localhost
     retry:
       max_attempts: 3
-      delay_secs: 60
+      delay: 60s
   - id: transform
     type: command
     command: ./transform.sh
@@ -429,7 +431,7 @@ tasks:
     command: /usr/bin/python
     args: ["-c", "print('hello')"]
     working_dir: /tmp
-    timeout_secs: 300
+    timeout: 5m
 "#;
         let config = YamlLoader::parse_job_config(yaml).unwrap();
         let task = &config.tasks[0];
@@ -439,12 +441,12 @@ tasks:
                 command,
                 args,
                 working_dir,
-                timeout_secs,
+                timeout,
             } => {
                 assert_eq!(command, "/usr/bin/python");
                 assert_eq!(args, &vec!["-c", "print('hello')"]);
                 assert_eq!(working_dir, &Some("/tmp".to_string()));
-                assert_eq!(timeout_secs, &Some(300));
+                assert_eq!(timeout, &Some(Duration::from_secs(300)));
             }
             _ => panic!("Expected Command task type"),
         }
@@ -488,13 +490,13 @@ tasks:
     command: ./flaky.sh
     retry:
       max_attempts: 5
-      delay_secs: 30
+      delay: 30s
       condition: transient_only
 "#;
         let config = YamlLoader::parse_job_config(yaml).unwrap();
         let retry = config.tasks[0].retry.as_ref().unwrap();
         assert_eq!(retry.max_attempts, 5);
-        assert_eq!(retry.delay_secs, 30);
+        assert_eq!(retry.delay, Duration::from_secs(30));
         assert!(matches!(
             retry.condition,
             RetryConditionConfig::TransientOnly
@@ -551,7 +553,7 @@ depends_on:
   - job: upstream_job_3
     condition:
       within_window:
-        seconds: 3600
+        duration: 1h
 tasks:
   - id: task1
     type: command
@@ -578,8 +580,8 @@ tasks:
         // Detailed dependency with within_window
         match &config.depends_on[2] {
             JobDependencyConfig::Detailed { condition, .. } => match condition {
-                JobDependencyConditionConfig::WithinWindow { seconds } => {
-                    assert_eq!(*seconds, 3600);
+                JobDependencyConditionConfig::WithinWindow { duration } => {
+                    assert_eq!(*duration, Duration::from_secs(3600));
                 }
                 _ => panic!("Expected WithinWindow condition"),
             },
@@ -668,7 +670,7 @@ tasks:
 default_timezone: UTC
 default_retry:
   max_attempts: 3
-  delay_secs: 60
+  delay: 1m
 max_concurrent_jobs: 10
 max_concurrent_tasks: 5
 storage:

@@ -40,7 +40,7 @@ use std::sync::{Arc, RwLock};
 ///       BATCH_SIZE: "1000"
 ///     retry:
 ///       max_attempts: 3
-///       delay_secs: 60
+///       delay: 1m
 ///
 ///   - id: transform
 ///     type: command
@@ -704,7 +704,7 @@ tasks:
     command: ./flaky.sh
     retry:
       max_attempts: 5
-      delay_secs: 30
+      delay: 30s
       condition: always
 "#;
 
@@ -712,5 +712,5 @@ tasks:
 
     let retry = job_config.tasks[0].retry.as_ref().unwrap();
     assert_eq!(retry.max_attempts, 5);
-    assert_eq!(retry.delay_secs, 30);
+    assert_eq!(retry.delay, std::time::Duration::from_secs(30));
 }
