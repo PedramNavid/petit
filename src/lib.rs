@@ -41,10 +41,7 @@ pub use config::{
 };
 
 pub use scheduler::{Scheduler, SchedulerError, SchedulerHandle, SchedulerState};
-pub use testing::{
-    ExecutionTracker, FailingTask, FailureInjection, MockTaskContext, TestHarness, TestResult,
-    Timeline, TimelineEntry, TimelineEventType, TrackedTask,
-};
+pub use testing::{FailingTask, FailureInjection, MockTaskContext, TestHarness, TestResult};
 
 #[cfg(feature = "api")]
 pub use api::{ApiConfig, ApiState, build_router, create_api_state, start_server};

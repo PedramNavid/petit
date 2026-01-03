@@ -3,16 +3,13 @@
 //! This module provides helpers for testing task orchestration:
 //!
 //! - [`MockTaskContext`]: A context that provides inputs and captures outputs
-//! - [`TestHarness`]: Runs DAGs with in-memory storage and timeline tracking
+//! - [`TestHarness`]: Runs DAGs with in-memory storage
 //! - [`FailingTask`]: A task helper that fails N times then succeeds
-//! - [`Timeline`]: Records execution events for verification
 
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use crate::core::context::TaskContext;
@@ -238,300 +235,6 @@ impl Task for FailingTask {
     }
 }
 
-/// An entry in the execution timeline.
-#[derive(Debug, Clone)]
-pub struct TimelineEntry {
-    /// The task ID.
-    pub task_id: TaskId,
-    /// The type of event.
-    pub event_type: TimelineEventType,
-    /// When this event occurred.
-    pub timestamp: Instant,
-    /// Optional duration (for completed events).
-    pub duration: Option<Duration>,
-    /// Optional error message (for failed events).
-    pub error: Option<String>,
-}
-
-/// Types of events in the timeline.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TimelineEventType {
-    /// Task started executing.
-    Started,
-    /// Task completed successfully.
-    Completed,
-    /// Task failed.
-    Failed,
-    /// Task is being retried.
-    Retrying { attempt: u32, max_attempts: u32 },
-}
-
-/// Shared execution tracker for recording task execution order.
-///
-/// Tasks can use this to record when they start/complete, enabling
-/// timeline verification in tests.
-#[derive(Clone)]
-pub struct ExecutionTracker {
-    entries: Arc<Mutex<Vec<TimelineEntry>>>,
-    order_counter: Arc<AtomicU32>,
-}
-
-impl ExecutionTracker {
-    /// Create a new execution tracker.
-    pub fn new() -> Self {
-        Self {
-            entries: Arc::new(Mutex::new(Vec::new())),
-            order_counter: Arc::new(AtomicU32::new(0)),
-        }
-    }
-
-    /// Record that a task started.
-    pub async fn record_start(&self, task_id: &TaskId) {
-        let _order = self.order_counter.fetch_add(1, Ordering::SeqCst);
-        self.entries.lock().await.push(TimelineEntry {
-            task_id: task_id.clone(),
-            event_type: TimelineEventType::Started,
-            timestamp: Instant::now(),
-            duration: None,
-            error: None,
-        });
-    }
-
-    /// Record that a task completed successfully.
-    pub async fn record_complete(&self, task_id: &TaskId, duration: Duration) {
-        self.entries.lock().await.push(TimelineEntry {
-            task_id: task_id.clone(),
-            event_type: TimelineEventType::Completed,
-            timestamp: Instant::now(),
-            duration: Some(duration),
-            error: None,
-        });
-    }
-
-    /// Record that a task failed.
-    pub async fn record_failure(&self, task_id: &TaskId, error: String) {
-        self.entries.lock().await.push(TimelineEntry {
-            task_id: task_id.clone(),
-            event_type: TimelineEventType::Failed,
-            timestamp: Instant::now(),
-            duration: None,
-            error: Some(error),
-        });
-    }
-}
-
-impl Default for ExecutionTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Records events for timeline verification.
-///
-/// Use with `TestHarness` to verify execution order. This works with
-/// `TrackedTask` wrappers that record their execution to the timeline.
-pub struct Timeline {
-    entries: Arc<Mutex<Vec<TimelineEntry>>>,
-}
-
-impl Timeline {
-    /// Create a new timeline recorder.
-    pub fn new() -> Self {
-        Self {
-            entries: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    /// Create a timeline from an execution tracker.
-    pub fn from_tracker(tracker: &ExecutionTracker) -> Self {
-        Self {
-            entries: tracker.entries.clone(),
-        }
-    }
-
-    /// Get all recorded entries.
-    pub async fn entries(&self) -> Vec<TimelineEntry> {
-        self.entries.lock().await.clone()
-    }
-
-    /// Get entries for a specific task.
-    pub async fn entries_for_task(&self, task_id: &TaskId) -> Vec<TimelineEntry> {
-        self.entries
-            .lock()
-            .await
-            .iter()
-            .filter(|e| &e.task_id == task_id)
-            .cloned()
-            .collect()
-    }
-
-    /// Get the order in which tasks started.
-    pub async fn start_order(&self) -> Vec<TaskId> {
-        self.entries
-            .lock()
-            .await
-            .iter()
-            .filter(|e| e.event_type == TimelineEventType::Started)
-            .map(|e| e.task_id.clone())
-            .collect()
-    }
-
-    /// Get the order in which tasks completed (successfully or failed).
-    pub async fn completion_order(&self) -> Vec<TaskId> {
-        self.entries
-            .lock()
-            .await
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.event_type,
-                    TimelineEventType::Completed | TimelineEventType::Failed
-                )
-            })
-            .map(|e| e.task_id.clone())
-            .collect()
-    }
-
-    /// Verify that tasks started in the given order.
-    ///
-    /// Returns `Ok(())` if order matches, `Err` with details otherwise.
-    pub async fn assert_start_order(&self, expected: &[&str]) -> Result<(), String> {
-        let actual = self.start_order().await;
-        let expected: Vec<TaskId> = expected.iter().map(|s| TaskId::new(*s)).collect();
-
-        if actual == expected {
-            Ok(())
-        } else {
-            Err(format!(
-                "Start order mismatch.\nExpected: {:?}\nActual: {:?}",
-                expected.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
-                actual.iter().map(|t| t.as_str()).collect::<Vec<_>>()
-            ))
-        }
-    }
-
-    /// Verify that a task started before another.
-    pub async fn assert_started_before(&self, first: &str, second: &str) -> Result<(), String> {
-        let order = self.start_order().await;
-        let first_idx = order.iter().position(|t| t.as_str() == first);
-        let second_idx = order.iter().position(|t| t.as_str() == second);
-
-        match (first_idx, second_idx) {
-            (Some(f), Some(s)) if f < s => Ok(()),
-            (Some(f), Some(s)) => Err(format!(
-                "Task '{}' started at index {}, but '{}' started earlier at index {}",
-                first, f, second, s
-            )),
-            (None, _) => Err(format!("Task '{}' not found in timeline", first)),
-            (_, None) => Err(format!("Task '{}' not found in timeline", second)),
-        }
-    }
-
-    /// Check if tasks ran concurrently (overlapping time windows).
-    pub async fn ran_concurrently(&self, task_a: &str, task_b: &str) -> bool {
-        let entries = self.entries.lock().await;
-
-        // Find start/end for task_a
-        let a_start = entries
-            .iter()
-            .find(|e| e.task_id.as_str() == task_a && e.event_type == TimelineEventType::Started)
-            .map(|e| e.timestamp);
-        let a_end = entries
-            .iter()
-            .find(|e| {
-                e.task_id.as_str() == task_a
-                    && matches!(
-                        e.event_type,
-                        TimelineEventType::Completed | TimelineEventType::Failed
-                    )
-            })
-            .map(|e| e.timestamp);
-
-        // Find start/end for task_b
-        let b_start = entries
-            .iter()
-            .find(|e| e.task_id.as_str() == task_b && e.event_type == TimelineEventType::Started)
-            .map(|e| e.timestamp);
-        let b_end = entries
-            .iter()
-            .find(|e| {
-                e.task_id.as_str() == task_b
-                    && matches!(
-                        e.event_type,
-                        TimelineEventType::Completed | TimelineEventType::Failed
-                    )
-            })
-            .map(|e| e.timestamp);
-
-        // Check for overlap: A starts before B ends AND B starts before A ends
-        match (a_start, a_end, b_start, b_end) {
-            (Some(as_), Some(ae), Some(bs), Some(be)) => as_ < be && bs < ae,
-            _ => false,
-        }
-    }
-}
-
-impl Default for Timeline {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// A task wrapper that records execution to an ExecutionTracker.
-///
-/// Wrap any task with this to enable timeline tracking.
-pub struct TrackedTask<T: Task> {
-    inner: T,
-    tracker: ExecutionTracker,
-}
-
-impl<T: Task> TrackedTask<T> {
-    /// Create a tracked wrapper around a task.
-    pub fn new(task: T, tracker: ExecutionTracker) -> Self {
-        Self {
-            inner: task,
-            tracker,
-        }
-    }
-}
-
-#[async_trait]
-impl<T: Task> Task for TrackedTask<T> {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    async fn execute(&self, ctx: &mut TaskContext) -> Result<(), TaskError> {
-        let task_id = TaskId::new(self.inner.name());
-        let start = Instant::now();
-
-        self.tracker.record_start(&task_id).await;
-
-        let result = self.inner.execute(ctx).await;
-
-        match &result {
-            Ok(()) => {
-                self.tracker
-                    .record_complete(&task_id, start.elapsed())
-                    .await;
-            }
-            Err(e) => {
-                self.tracker.record_failure(&task_id, e.to_string()).await;
-            }
-        }
-
-        result
-    }
-
-    fn retry_policy(&self) -> RetryPolicy {
-        self.inner.retry_policy()
-    }
-
-    fn description(&self) -> Option<&str> {
-        self.inner.description()
-    }
-}
-
 /// Configuration for failure injection in TestHarness.
 #[derive(Clone, Default)]
 pub struct FailureInjection {
@@ -572,7 +275,6 @@ impl FailureInjection {
 /// A test harness for running DAGs with in-memory storage.
 ///
 /// Provides:
-/// - Automatic timeline tracking (when using TrackedTask wrappers)
 /// - Execution with configurable concurrency
 /// - Failure injection configuration
 /// - Assertions on execution results
@@ -580,26 +282,21 @@ impl FailureInjection {
 /// # Example
 ///
 /// ```ignore
-/// use petit::testing::{TestHarness, TrackedTask, ExecutionTracker};
+/// use petit::testing::TestHarness;
 /// use petit::DagBuilder;
 ///
-/// let tracker = ExecutionTracker::new();
 /// let harness = TestHarness::new()
-///     .with_tracker(tracker.clone())
 ///     .with_concurrency(2);
 ///
 /// let dag = DagBuilder::new("test", "Test DAG")
-///     .add_task(Arc::new(TrackedTask::new(my_task, tracker.clone())))
+///     .add_task(my_task)
 ///     .build()?;
 ///
 /// let result = harness.execute(&dag).await;
-///
 /// assert!(result.dag_result.success);
-/// harness.timeline().assert_start_order(&["task_a", "task_b"]).await?;
 /// ```
 pub struct TestHarness {
     executor: DagExecutor,
-    tracker: ExecutionTracker,
     failure_injection: FailureInjection,
     initial_context: HashMap<String, Value>,
 }
@@ -617,7 +314,6 @@ impl TestHarness {
     pub fn new() -> Self {
         Self {
             executor: DagExecutor::with_concurrency(4),
-            tracker: ExecutionTracker::new(),
             failure_injection: FailureInjection::default(),
             initial_context: HashMap::new(),
         }
@@ -626,12 +322,6 @@ impl TestHarness {
     /// Set the concurrency limit for task execution.
     pub fn with_concurrency(mut self, max_concurrency: usize) -> Self {
         self.executor = DagExecutor::with_concurrency(max_concurrency);
-        self
-    }
-
-    /// Set a custom execution tracker for timeline recording.
-    pub fn with_tracker(mut self, tracker: ExecutionTracker) -> Self {
-        self.tracker = tracker;
         self
     }
 
@@ -646,16 +336,6 @@ impl TestHarness {
         let json_value = serde_json::to_value(value).expect("failed to serialize context value");
         self.initial_context.insert(key.into(), json_value);
         self
-    }
-
-    /// Get the execution tracker for this harness.
-    pub fn tracker(&self) -> &ExecutionTracker {
-        &self.tracker
-    }
-
-    /// Get a timeline view of the execution.
-    pub fn timeline(&self) -> Timeline {
-        Timeline::from_tracker(&self.tracker)
     }
 
     /// Execute a DAG and return the result.
@@ -953,192 +633,6 @@ mod tests {
             serde_json::from_value(result.context.get("transform.result").unwrap().clone())
                 .unwrap();
         assert_eq!(output, 42);
-    }
-
-    // ==========================================================================
-    // Timeline Tests (using TrackedTask for execution recording)
-    // ==========================================================================
-
-    /// Helper to create a tracked task that records to a shared tracker.
-    fn tracked<T: Task + 'static>(task: T, tracker: &ExecutionTracker) -> Arc<dyn Task> {
-        Arc::new(TrackedTask::new(task, tracker.clone()))
-    }
-
-    // Simple task that doesn't use Arc for tracking tests
-    struct SimpleTaskInner {
-        name: String,
-    }
-
-    impl SimpleTaskInner {
-        fn new(name: &str) -> Self {
-            Self {
-                name: name.to_string(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Task for SimpleTaskInner {
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        async fn execute(&self, ctx: &mut TaskContext) -> Result<(), TaskError> {
-            ctx.outputs.set("executed", true)?;
-            Ok(())
-        }
-    }
-
-    // Slow task inner for tracking tests
-    struct SlowTaskInner {
-        name: String,
-        duration: Duration,
-    }
-
-    impl SlowTaskInner {
-        fn new(name: &str, duration: Duration) -> Self {
-            Self {
-                name: name.to_string(),
-                duration,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Task for SlowTaskInner {
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        async fn execute(&self, ctx: &mut TaskContext) -> Result<(), TaskError> {
-            tokio::time::sleep(self.duration).await;
-            ctx.outputs.set("completed", true)?;
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn test_timeline_records_execution_order() {
-        let tracker = ExecutionTracker::new();
-        let harness = TestHarness::new().with_tracker(tracker.clone());
-
-        let dag = DagBuilder::new("timeline_test", "Timeline Test DAG")
-            .add_task(tracked(SimpleTaskInner::new("a"), &tracker))
-            .add_task_with_deps(tracked(SimpleTaskInner::new("b"), &tracker), &["a"])
-            .add_task_with_deps(tracked(SimpleTaskInner::new("c"), &tracker), &["b"])
-            .build()
-            .unwrap();
-
-        let _ = harness.execute(&dag).await;
-
-        // Verify start order - linear DAG should execute in order
-        let start_order = harness.timeline().start_order().await;
-        assert_eq!(start_order.len(), 3);
-        assert_eq!(start_order[0].as_str(), "a");
-        assert_eq!(start_order[1].as_str(), "b");
-        assert_eq!(start_order[2].as_str(), "c");
-    }
-
-    #[tokio::test]
-    async fn test_timeline_assert_start_order() {
-        let tracker = ExecutionTracker::new();
-        let harness = TestHarness::new().with_tracker(tracker.clone());
-
-        let dag = DagBuilder::new("order_test", "Order Test DAG")
-            .add_task(tracked(SimpleTaskInner::new("first"), &tracker))
-            .add_task_with_deps(
-                tracked(SimpleTaskInner::new("second"), &tracker),
-                &["first"],
-            )
-            .build()
-            .unwrap();
-
-        let _ = harness.execute(&dag).await;
-
-        // This should pass
-        harness
-            .timeline()
-            .assert_start_order(&["first", "second"])
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_timeline_assert_started_before() {
-        let tracker = ExecutionTracker::new();
-        let harness = TestHarness::new().with_tracker(tracker.clone());
-
-        let dag = DagBuilder::new("before_test", "Before Test DAG")
-            .add_task(tracked(SimpleTaskInner::new("early"), &tracker))
-            .add_task_with_deps(tracked(SimpleTaskInner::new("late"), &tracker), &["early"])
-            .build()
-            .unwrap();
-
-        let _ = harness.execute(&dag).await;
-
-        // This should pass
-        harness
-            .timeline()
-            .assert_started_before("early", "late")
-            .await
-            .unwrap();
-
-        // This should fail
-        let result = harness
-            .timeline()
-            .assert_started_before("late", "early")
-            .await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_timeline_detects_concurrent_execution() {
-        let tracker = ExecutionTracker::new();
-        let harness = TestHarness::new()
-            .with_tracker(tracker.clone())
-            .with_concurrency(4);
-
-        // A -> B, C (B and C should run concurrently after A)
-        let dag = DagBuilder::new("concurrent_test", "Concurrent Test DAG")
-            .add_task(tracked(SimpleTaskInner::new("a"), &tracker))
-            .add_task_with_deps(
-                tracked(SlowTaskInner::new("b", Duration::from_millis(50)), &tracker),
-                &["a"],
-            )
-            .add_task_with_deps(
-                tracked(SlowTaskInner::new("c", Duration::from_millis(50)), &tracker),
-                &["a"],
-            )
-            .build()
-            .unwrap();
-
-        let _ = harness.execute(&dag).await;
-
-        // B and C should have run concurrently
-        assert!(harness.timeline().ran_concurrently("b", "c").await);
-    }
-
-    #[tokio::test]
-    async fn test_timeline_entries_for_task() {
-        let tracker = ExecutionTracker::new();
-        let harness = TestHarness::new().with_tracker(tracker.clone());
-
-        let dag = DagBuilder::new("entries_test", "Entries Test DAG")
-            .add_task(tracked(SimpleTaskInner::new("target"), &tracker))
-            .build()
-            .unwrap();
-
-        let _ = harness.execute(&dag).await;
-
-        let entries = harness
-            .timeline()
-            .entries_for_task(&TaskId::new("target"))
-            .await;
-
-        // Should have Started and Completed events
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].event_type, TimelineEventType::Started);
-        assert_eq!(entries[1].event_type, TimelineEventType::Completed);
     }
 
     // ==========================================================================
