@@ -262,28 +262,91 @@ pub enum JobDependencyConditionConfig {
 }
 
 /// YAML configuration loader.
+///
+/// Provides methods to load and parse configuration from YAML files or strings.
 pub struct YamlLoader;
 
 impl YamlLoader {
     /// Load global configuration from a file.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use petit::config::YamlLoader;
+    ///
+    /// let config = YamlLoader::load_global_config("petit.yaml")?;
+    /// println!("Max concurrent jobs: {:?}", config.max_concurrent_jobs);
+    /// # Ok::<(), petit::config::ConfigError>(())
+    /// ```
     pub fn load_global_config(path: impl AsRef<Path>) -> Result<GlobalConfig, ConfigError> {
         let content = std::fs::read_to_string(path)?;
         Self::parse_global_config(&content)
     }
 
     /// Parse global configuration from a YAML string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use petit::config::YamlLoader;
+    ///
+    /// let yaml = r#"
+    /// default_timezone: UTC
+    /// max_concurrent_jobs: 5
+    /// "#;
+    ///
+    /// let config = YamlLoader::parse_global_config(yaml)?;
+    /// assert_eq!(config.default_timezone, Some("UTC".to_string()));
+    /// assert_eq!(config.max_concurrent_jobs, Some(5));
+    /// # Ok::<(), petit::config::ConfigError>(())
+    /// ```
     pub fn parse_global_config(yaml: &str) -> Result<GlobalConfig, ConfigError> {
         let config: GlobalConfig = serde_yaml::from_str(yaml)?;
         Ok(config)
     }
 
     /// Load a job configuration from a file.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use petit::config::YamlLoader;
+    ///
+    /// let config = YamlLoader::load_job_config("jobs/my_job.yaml")?;
+    /// println!("Job: {} ({})", config.name, config.id);
+    /// println!("Tasks: {}", config.tasks.len());
+    /// # Ok::<(), petit::config::ConfigError>(())
+    /// ```
     pub fn load_job_config(path: impl AsRef<Path>) -> Result<JobConfig, ConfigError> {
         let content = std::fs::read_to_string(path)?;
         Self::parse_job_config(&content)
     }
 
     /// Parse a job configuration from a YAML string.
+    ///
+    /// The configuration is validated to ensure it is well-formed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use petit::config::YamlLoader;
+    ///
+    /// let yaml = r#"
+    /// id: example
+    /// name: Example Job
+    /// schedule: "@daily"
+    /// tasks:
+    ///   - id: task1
+    ///     type: command
+    ///     command: echo
+    ///     args: [hello]
+    /// "#;
+    ///
+    /// let config = YamlLoader::parse_job_config(yaml)?;
+    /// assert_eq!(config.id, "example");
+    /// assert_eq!(config.tasks.len(), 1);
+    /// # Ok::<(), petit::config::ConfigError>(())
+    /// ```
     pub fn parse_job_config(yaml: &str) -> Result<JobConfig, ConfigError> {
         let config: JobConfig = serde_yaml::from_str(yaml)?;
         Self::validate_job_config(&config)?;
