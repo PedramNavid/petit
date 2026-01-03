@@ -1,5 +1,6 @@
 pub mod context;
 pub mod dag;
+pub mod duration;
 pub mod environment;
 pub mod job;
 pub mod retry;

@@ -40,7 +40,10 @@ pub enum DependencyCondition {
     #[default]
     LastSuccess,
     /// Dependent job must have succeeded within the given duration.
-    WithinWindow(Duration),
+    ///
+    /// The duration is serialized in a human-readable format (e.g., "1h30m", "2d", "90m").
+    /// See [`crate::core::duration`] for supported formats.
+    WithinWindow(#[serde(with = "super::duration")] Duration),
     /// Dependent job must have completed (success or failure).
     LastComplete,
 }
@@ -617,5 +620,127 @@ mod tests {
         assert!(debug_str.contains("test_dag")); // dag_id
         assert!(debug_str.contains("upstream")); // dependency
         assert!(debug_str.contains("max_concurrency: Some(2)"));
+    }
+
+    #[test]
+    fn test_dependency_condition_serde_json() {
+        // Test LastSuccess
+        let condition = DependencyCondition::LastSuccess;
+        let json = serde_json::to_string(&condition).unwrap();
+        assert_eq!(json, r#""LastSuccess""#);
+        let parsed: DependencyCondition = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, condition);
+
+        // Test WithinWindow with human-readable duration
+        let condition = DependencyCondition::WithinWindow(Duration::from_secs(5400));
+        let json = serde_json::to_string(&condition).unwrap();
+        assert_eq!(json, r#"{"WithinWindow":"1h30m"}"#);
+        let parsed: DependencyCondition = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, condition);
+
+        // Test WithinWindow deserialization from numeric seconds (backwards compatibility)
+        let json = r#"{"WithinWindow":5400}"#;
+        let parsed: DependencyCondition = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed,
+            DependencyCondition::WithinWindow(Duration::from_secs(5400))
+        );
+
+        // Test LastComplete
+        let condition = DependencyCondition::LastComplete;
+        let json = serde_json::to_string(&condition).unwrap();
+        assert_eq!(json, r#""LastComplete""#);
+        let parsed: DependencyCondition = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, condition);
+    }
+
+    #[test]
+    fn test_dependency_condition_serde_yaml() {
+        // Test LastSuccess
+        let condition = DependencyCondition::LastSuccess;
+        let yaml = serde_yaml::to_string(&condition).unwrap();
+        assert!(yaml.contains("LastSuccess"));
+        let parsed: DependencyCondition = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, condition);
+
+        // Test WithinWindow with human-readable duration
+        let condition = DependencyCondition::WithinWindow(Duration::from_secs(5400));
+        let yaml = serde_yaml::to_string(&condition).unwrap();
+        assert!(yaml.contains("WithinWindow"));
+        assert!(yaml.contains("1h30m"));
+        let parsed: DependencyCondition = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, condition);
+
+        // Test WithinWindow deserialization from numeric seconds (backwards compatibility)
+        let yaml = "!WithinWindow 5400\n";
+        let parsed: DependencyCondition = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            parsed,
+            DependencyCondition::WithinWindow(Duration::from_secs(5400))
+        );
+
+        // Test LastComplete
+        let condition = DependencyCondition::LastComplete;
+        let yaml = serde_yaml::to_string(&condition).unwrap();
+        assert!(yaml.contains("LastComplete"));
+        let parsed: DependencyCondition = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, condition);
+    }
+
+    #[test]
+    fn test_dependency_condition_various_durations() {
+        let test_cases = vec![
+            (Duration::from_secs(30), "30s"),
+            (Duration::from_secs(300), "5m"),
+            (Duration::from_secs(3600), "1h"),
+            (Duration::from_secs(5400), "1h30m"),
+            (Duration::from_secs(86400), "1d"),
+            (Duration::from_secs(93784), "1d2h3m4s"),
+        ];
+
+        for (duration, expected_str) in test_cases {
+            let condition = DependencyCondition::WithinWindow(duration);
+            let json = serde_json::to_string(&condition).unwrap();
+            assert!(
+                json.contains(expected_str),
+                "Expected JSON to contain '{}', got: {}",
+                expected_str,
+                json
+            );
+
+            // Verify roundtrip
+            let parsed: DependencyCondition = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, condition);
+        }
+    }
+
+    #[test]
+    fn test_job_dependency_serde() {
+        let dep = JobDependency::with_condition(
+            JobId::new("upstream"),
+            DependencyCondition::WithinWindow(Duration::from_secs(5400)),
+        );
+
+        // JSON
+        let json = serde_json::to_string(&dep).unwrap();
+        assert!(json.contains("upstream"));
+        assert!(json.contains("1h30m"));
+        let parsed: JobDependency = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.job_id(), &JobId::new("upstream"));
+        assert_eq!(
+            parsed.condition(),
+            &DependencyCondition::WithinWindow(Duration::from_secs(5400))
+        );
+
+        // YAML
+        let yaml = serde_yaml::to_string(&dep).unwrap();
+        assert!(yaml.contains("upstream"));
+        assert!(yaml.contains("1h30m"));
+        let parsed: JobDependency = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.job_id(), &JobId::new("upstream"));
+        assert_eq!(
+            parsed.condition(),
+            &DependencyCondition::WithinWindow(Duration::from_secs(5400))
+        );
     }
 }
