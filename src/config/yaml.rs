@@ -309,6 +309,13 @@ impl YamlLoader {
             ));
         }
 
+        // Check that max_concurrency is not zero (would make jobs un-runnable)
+        if config.max_concurrency == Some(0) {
+            return Err(ConfigError::InvalidConfig(
+                "max_concurrency cannot be zero".into(),
+            ));
+        }
+
         // Check for duplicate task IDs
         let mut task_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for task in &config.tasks {
@@ -635,6 +642,24 @@ tasks:
 "#;
         let result = YamlLoader::parse_job_config(yaml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn test_validation_error_zero_max_concurrency() {
+        let yaml = r#"
+id: zero_concurrency_job
+name: Zero Concurrency Job
+max_concurrency: 0
+tasks:
+  - id: task1
+    type: command
+    command: echo
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("max_concurrency cannot be zero"));
+        }
     }
 
     #[test]
