@@ -1,0 +1,91 @@
+# Petit Configuration File Example
+#
+# This file demonstrates all available configuration options for the Petit task orchestrator.
+# By default, Petit looks for this file at ~/.config/petit/config.toml
+# You can also specify a custom config path using: pt --config /path/to/config.toml
+#
+# Command-line arguments always take precedence over configuration file settings.
+
+# Storage Configuration
+# Defines how Petit stores job runs, task states, and execution history.
+[storage]
+# Storage engine: "memory" or "sqlite"
+# - memory: Fast, but data is lost when the application stops
+# - sqlite: Persistent storage to a database file (requires sqlite feature)
+engine = "memory"
+
+# For SQLite storage, specify the database file path:
+# engine = "sqlite"
+# path = "/var/lib/petit/petit.db"
+
+# API Server Configuration (requires api feature, enabled by default)
+[api]
+# Enable or disable the HTTP REST API server
+enabled = true
+
+# Host address to bind the API server
+host = "127.0.0.1"
+
+# Port number for the API server
+port = 8565
+
+# Scheduler Configuration
+[scheduler]
+# Maximum number of concurrent jobs (default: unlimited)
+# Uncomment to limit concurrent job execution:
+# max_jobs = 10
+
+# Maximum number of concurrent tasks per job (default: 4)
+max_tasks = 4
+
+# Scheduler tick interval in seconds (default: 1)
+# How often the scheduler checks for jobs that need to run
+tick_interval = 1
+
+# Example configurations for different use cases:
+
+# === Development Configuration ===
+# Use in-memory storage for quick testing without persistence
+# [storage]
+# engine = "memory"
+#
+# [api]
+# enabled = true
+# host = "127.0.0.1"
+# port = 8565
+#
+# [scheduler]
+# max_tasks = 2
+# tick_interval = 1
+
+# === Production Configuration ===
+# Use SQLite for persistent storage and reasonable concurrency limits
+# [storage]
+# engine = "sqlite"
+# path = "/var/lib/petit/petit.db"
+#
+# [api]
+# enabled = true
+# host = "0.0.0.0"
+# port = 8565
+#
+# [scheduler]
+# max_jobs = 50
+# max_tasks = 8
+# tick_interval = 1
+
+# === High-Throughput Configuration ===
+# Maximize concurrency for high-volume task processing
+# [storage]
+# engine = "sqlite"
+# path = "/var/lib/petit/petit.db"
+#
+# [api]
+# enabled = true
+# host = "0.0.0.0"
+# port = 8565
+#
+# [scheduler]
+# max_jobs = 100
+# max_tasks = 16
+# tick_interval = 1

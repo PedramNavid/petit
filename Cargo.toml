@@ -30,6 +30,8 @@ chrono-tz = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.8"
+dirs = "6"
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 axum = { version = "0.8", optional = true }
