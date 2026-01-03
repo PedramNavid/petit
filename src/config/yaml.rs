@@ -2,6 +2,10 @@
 //!
 //! Parses job definitions and global configuration from YAML files.
 
+use crate::core::dag::TaskCondition;
+use crate::core::job::DependencyCondition;
+use crate::core::retry::{RetryCondition, RetryPolicy};
+use crate::core::schedule::Schedule;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -345,6 +349,71 @@ impl YamlLoader {
     /// Convert retry config to Duration.
     pub fn retry_delay(config: &RetryConfig) -> Duration {
         Duration::from_secs(config.delay_secs)
+    }
+}
+
+// ============================================================================
+// Conversion implementations from config types to core types
+// ============================================================================
+
+impl TryFrom<RetryConfig> for RetryPolicy {
+    type Error = ConfigError;
+
+    fn try_from(config: RetryConfig) -> Result<Self, Self::Error> {
+        let condition = match config.condition {
+            RetryConditionConfig::Always => RetryCondition::Always,
+            RetryConditionConfig::TransientOnly => RetryCondition::TransientOnly,
+            RetryConditionConfig::Never => RetryCondition::Never,
+        };
+
+        Ok(
+            RetryPolicy::fixed(config.max_attempts, Duration::from_secs(config.delay_secs))
+                .with_condition(condition),
+        )
+    }
+}
+
+impl TryFrom<ScheduleConfig> for Schedule {
+    type Error = ConfigError;
+
+    fn try_from(config: ScheduleConfig) -> Result<Self, Self::Error> {
+        match config {
+            ScheduleConfig::Simple(cron) => {
+                Schedule::new(cron).map_err(|e| ConfigError::InvalidConfig(e.to_string()))
+            }
+            ScheduleConfig::Detailed { cron, timezone } => {
+                if let Some(tz) = timezone {
+                    Schedule::with_timezone(cron, tz)
+                        .map_err(|e| ConfigError::InvalidConfig(e.to_string()))
+                } else {
+                    Schedule::new(cron).map_err(|e| ConfigError::InvalidConfig(e.to_string()))
+                }
+            }
+        }
+    }
+}
+
+impl From<TaskConditionConfig> for TaskCondition {
+    fn from(config: TaskConditionConfig) -> Self {
+        match config {
+            TaskConditionConfig::AllSuccess => TaskCondition::AllSuccess,
+            TaskConditionConfig::OnFailure => TaskCondition::OnFailure,
+            TaskConditionConfig::AllDone => TaskCondition::AllDone,
+        }
+    }
+}
+
+impl TryFrom<JobDependencyConditionConfig> for DependencyCondition {
+    type Error = ConfigError;
+
+    fn try_from(config: JobDependencyConditionConfig) -> Result<Self, Self::Error> {
+        match config {
+            JobDependencyConditionConfig::LastSuccess => Ok(DependencyCondition::LastSuccess),
+            JobDependencyConditionConfig::LastComplete => Ok(DependencyCondition::LastComplete),
+            JobDependencyConditionConfig::WithinWindow { seconds } => Ok(
+                DependencyCondition::WithinWindow(Duration::from_secs(seconds)),
+            ),
+        }
     }
 }
 
@@ -797,5 +866,206 @@ tasks:
             }
             _ => panic!("Expected Custom task type"),
         }
+    }
+
+    // ========================================================================
+    // Conversion tests
+    // ========================================================================
+
+    #[test]
+    fn test_retry_config_to_retry_policy_with_always_condition() {
+        let config = RetryConfig {
+            max_attempts: 3,
+            delay_secs: 60,
+            condition: RetryConditionConfig::Always,
+        };
+
+        let policy: RetryPolicy = config.try_into().unwrap();
+
+        assert_eq!(policy.max_attempts, 3);
+        assert_eq!(policy.delay, Duration::from_secs(60));
+        assert_eq!(policy.retry_on, RetryCondition::Always);
+    }
+
+    #[test]
+    fn test_retry_config_to_retry_policy_with_transient_only() {
+        let config = RetryConfig {
+            max_attempts: 5,
+            delay_secs: 30,
+            condition: RetryConditionConfig::TransientOnly,
+        };
+
+        let policy: RetryPolicy = config.try_into().unwrap();
+
+        assert_eq!(policy.max_attempts, 5);
+        assert_eq!(policy.delay, Duration::from_secs(30));
+        assert_eq!(policy.retry_on, RetryCondition::TransientOnly);
+    }
+
+    #[test]
+    fn test_retry_config_to_retry_policy_with_never() {
+        let config = RetryConfig {
+            max_attempts: 0,
+            delay_secs: 0,
+            condition: RetryConditionConfig::Never,
+        };
+
+        let policy: RetryPolicy = config.try_into().unwrap();
+
+        assert_eq!(policy.max_attempts, 0);
+        assert_eq!(policy.delay, Duration::from_secs(0));
+        assert_eq!(policy.retry_on, RetryCondition::Never);
+        assert!(!policy.is_enabled());
+    }
+
+    #[test]
+    fn test_schedule_config_simple_to_schedule() {
+        let config = ScheduleConfig::Simple("@daily".to_string());
+
+        let schedule: Schedule = config.try_into().unwrap();
+
+        assert_eq!(schedule.expression(), "@daily");
+        assert_eq!(schedule.timezone(), "UTC");
+    }
+
+    #[test]
+    fn test_schedule_config_simple_with_cron_to_schedule() {
+        let config = ScheduleConfig::Simple("0 9 * * *".to_string());
+
+        let schedule: Schedule = config.try_into().unwrap();
+
+        assert_eq!(schedule.expression(), "0 9 * * *");
+        assert_eq!(schedule.timezone(), "UTC");
+    }
+
+    #[test]
+    fn test_schedule_config_detailed_to_schedule() {
+        let config = ScheduleConfig::Detailed {
+            cron: "0 9 * * *".to_string(),
+            timezone: Some("America/New_York".to_string()),
+        };
+
+        let schedule: Schedule = config.try_into().unwrap();
+
+        assert_eq!(schedule.expression(), "0 9 * * *");
+        assert_eq!(schedule.timezone(), "America/New_York");
+    }
+
+    #[test]
+    fn test_schedule_config_detailed_without_timezone_to_schedule() {
+        let config = ScheduleConfig::Detailed {
+            cron: "@hourly".to_string(),
+            timezone: None,
+        };
+
+        let schedule: Schedule = config.try_into().unwrap();
+
+        assert_eq!(schedule.expression(), "@hourly");
+        assert_eq!(schedule.timezone(), "UTC");
+    }
+
+    #[test]
+    fn test_schedule_config_invalid_cron_returns_error() {
+        let config = ScheduleConfig::Simple("invalid cron".to_string());
+
+        let result: Result<Schedule, ConfigError> = config.try_into();
+
+        assert!(result.is_err());
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn test_schedule_config_invalid_timezone_returns_error() {
+        let config = ScheduleConfig::Detailed {
+            cron: "0 * * * *".to_string(),
+            timezone: Some("Invalid/Timezone".to_string()),
+        };
+
+        let result: Result<Schedule, ConfigError> = config.try_into();
+
+        assert!(result.is_err());
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn test_task_condition_config_all_success_to_task_condition() {
+        let config = TaskConditionConfig::AllSuccess;
+
+        let condition: TaskCondition = config.into();
+
+        assert_eq!(condition, TaskCondition::AllSuccess);
+    }
+
+    #[test]
+    fn test_task_condition_config_on_failure_to_task_condition() {
+        let config = TaskConditionConfig::OnFailure;
+
+        let condition: TaskCondition = config.into();
+
+        assert_eq!(condition, TaskCondition::OnFailure);
+    }
+
+    #[test]
+    fn test_task_condition_config_all_done_to_task_condition() {
+        let config = TaskConditionConfig::AllDone;
+
+        let condition: TaskCondition = config.into();
+
+        assert_eq!(condition, TaskCondition::AllDone);
+    }
+
+    #[test]
+    fn test_job_dependency_condition_config_last_success_to_dependency_condition() {
+        let config = JobDependencyConditionConfig::LastSuccess;
+
+        let condition: DependencyCondition = config.try_into().unwrap();
+
+        assert_eq!(condition, DependencyCondition::LastSuccess);
+    }
+
+    #[test]
+    fn test_job_dependency_condition_config_last_complete_to_dependency_condition() {
+        let config = JobDependencyConditionConfig::LastComplete;
+
+        let condition: DependencyCondition = config.try_into().unwrap();
+
+        assert_eq!(condition, DependencyCondition::LastComplete);
+    }
+
+    #[test]
+    fn test_job_dependency_condition_config_within_window_to_dependency_condition() {
+        let config = JobDependencyConditionConfig::WithinWindow { seconds: 3600 };
+
+        let condition: DependencyCondition = config.try_into().unwrap();
+
+        assert_eq!(
+            condition,
+            DependencyCondition::WithinWindow(Duration::from_secs(3600))
+        );
+    }
+
+    #[test]
+    fn test_conversion_roundtrip_retry_config() {
+        // Create a RetryConfig, convert to RetryPolicy, verify fields match
+        let config = RetryConfig {
+            max_attempts: 3,
+            delay_secs: 45,
+            condition: RetryConditionConfig::TransientOnly,
+        };
+
+        let policy: RetryPolicy = config.clone().try_into().unwrap();
+
+        assert_eq!(policy.max_attempts, config.max_attempts);
+        assert_eq!(policy.delay, Duration::from_secs(config.delay_secs));
+        assert_eq!(policy.retry_on, RetryCondition::TransientOnly);
+    }
+
+    #[test]
+    fn test_conversion_schedule_with_interval() {
+        let config = ScheduleConfig::Simple("@every 5m".to_string());
+
+        let schedule: Schedule = config.try_into().unwrap();
+
+        assert_eq!(schedule.expression(), "@every 5m");
     }
 }
