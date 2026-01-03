@@ -56,15 +56,20 @@ make all        # Same as ci
 ### CLI (pt binary)
 
 ```bash
-# Run scheduler with jobs from a directory
-cargo run -- run --jobs ./jobs
+# Run scheduler with jobs from a directory (API server starts by default)
+cargo run -- run ./jobs
 
-# Run scheduler with API server
-cargo run -- run --jobs ./jobs --api
+# Run scheduler without API server (requires api feature, enabled by default)
+cargo run -- run ./jobs --no-api
+
+# Run scheduler with custom API settings
+cargo run -- run ./jobs --api-port 8080 --api-host 0.0.0.0
 
 # Trigger a specific job once and exit
-cargo run -- run --jobs ./jobs --trigger my_job
+cargo run -- trigger ./jobs my_job
 ```
+
+**Note:** The `--no-api`, `--api-port`, and `--api-host` flags require the `api` feature to be enabled (which is the default). If compiling with `--no-default-features`, these flags will not be available.
 
 ### TUI Dashboard
 
@@ -104,9 +109,19 @@ GitHub Actions runs on every push and PR to main:
 
 ## Features
 
-- `sqlite` - Enables SQLite storage backend
+- `api` - Enables HTTP REST API and related CLI flags (`--no-api`, `--api-port`, `--api-host`). **Enabled by default.**
+- `sqlite` - Enables SQLite storage backend and `--db` CLI flag
 - `tui` - Enables terminal UI dashboard (includes sqlite)
-- `api` - Enables HTTP REST API (default)
+
+### Building Without Default Features
+
+```bash
+# Build without API support (no API server or API-related CLI flags)
+cargo build --no-default-features
+
+# Build with only SQLite support (no API)
+cargo build --no-default-features --features sqlite
+```
 
 ## Testing
 
@@ -123,7 +138,7 @@ Integration tests in `tests/integration/` cover:
 
 ## API Endpoints
 
-When running with `--api`, the following endpoints are available:
+When the `api` feature is enabled (default), an HTTP REST API server starts automatically unless `--no-api` is specified. The following endpoints are available:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
