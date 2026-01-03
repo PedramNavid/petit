@@ -3,7 +3,7 @@
 //! Parses job definitions and global configuration from YAML files.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
@@ -327,16 +327,97 @@ impl YamlLoader {
             }
         }
 
-        // Check that task dependencies reference valid tasks
+        // Check that task dependencies reference valid tasks, no self-dependencies, and no duplicates
         for task in &config.tasks {
+            let mut seen_deps = HashSet::new();
             for dep in &task.depends_on {
+                // Check self-dependency
+                if dep == &task.id {
+                    return Err(ConfigError::InvalidConfig(format!(
+                        "task '{}' cannot depend on itself",
+                        task.id
+                    )));
+                }
+                // Check dependency exists
                 if !task_ids.contains(dep.as_str()) {
                     return Err(ConfigError::InvalidConfig(format!(
                         "task '{}' depends on unknown task '{}'",
                         task.id, dep
                     )));
                 }
+                // Check for duplicate dependencies
+                if !seen_deps.insert(dep) {
+                    return Err(ConfigError::InvalidConfig(format!(
+                        "task '{}' has duplicate dependency '{}'",
+                        task.id, dep
+                    )));
+                }
             }
+        }
+
+        // Check for cycles using topological sort (Kahn's algorithm)
+        Self::validate_no_cycles(config)?;
+
+        Ok(())
+    }
+
+    /// Validate that there are no cycles in the task dependency graph.
+    fn validate_no_cycles(config: &JobConfig) -> Result<(), ConfigError> {
+        // Build dependency graph
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        let mut reverse_deps: HashMap<&str, Vec<&str>> = HashMap::new();
+
+        // Initialize in-degrees for all tasks
+        for task in &config.tasks {
+            in_degree.insert(&task.id, task.depends_on.len());
+            reverse_deps.insert(&task.id, Vec::new());
+        }
+
+        // Build reverse dependency map
+        for task in &config.tasks {
+            for dep in &task.depends_on {
+                reverse_deps.entry(dep.as_str()).or_default().push(&task.id);
+            }
+        }
+
+        // Kahn's algorithm: start with nodes that have no dependencies
+        let mut queue: VecDeque<&str> = in_degree
+            .iter()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut visited_count = 0;
+
+        while let Some(id) = queue.pop_front() {
+            visited_count += 1;
+
+            // Reduce in-degree for all downstream tasks
+            if let Some(downstream) = reverse_deps.get(id) {
+                for next in downstream {
+                    if let Some(degree) = in_degree.get_mut(next) {
+                        *degree -= 1;
+                        if *degree == 0 {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we didn't visit all nodes, there's a cycle
+        if visited_count != config.tasks.len() {
+            // Find tasks that are part of the cycle (those with non-zero in-degree)
+            let cycle_tasks: Vec<&str> = in_degree
+                .iter()
+                .filter(|(_, degree)| **degree > 0)
+                .map(|(id, _)| *id)
+                .collect();
+
+            return Err(ConfigError::InvalidConfig(format!(
+                "dependency cycle detected involving tasks: {}",
+                cycle_tasks.join(", ")
+            )));
         }
 
         Ok(())
@@ -797,5 +878,164 @@ tasks:
             }
             _ => panic!("Expected Custom task type"),
         }
+    }
+
+    #[test]
+    fn test_validation_error_self_dependency() {
+        let yaml = r#"
+id: self_dep_job
+name: Self Dependency Job
+tasks:
+  - id: task1
+    type: command
+    command: echo
+    depends_on: [task1]
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("cannot depend on itself"));
+            assert!(msg.contains("task1"));
+        }
+    }
+
+    #[test]
+    fn test_validation_error_duplicate_dependency() {
+        let yaml = r#"
+id: dup_dep_job
+name: Duplicate Dependency Job
+tasks:
+  - id: task1
+    type: command
+    command: echo
+  - id: task2
+    type: command
+    command: echo
+    depends_on: [task1, task1]
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("duplicate dependency"));
+            assert!(msg.contains("task2"));
+        }
+    }
+
+    #[test]
+    fn test_validation_error_simple_cycle() {
+        let yaml = r#"
+id: cycle_job
+name: Cycle Job
+tasks:
+  - id: task1
+    type: command
+    command: echo
+    depends_on: [task2]
+  - id: task2
+    type: command
+    command: echo
+    depends_on: [task1]
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("cycle detected"));
+        }
+    }
+
+    #[test]
+    fn test_validation_error_complex_cycle() {
+        let yaml = r#"
+id: complex_cycle_job
+name: Complex Cycle Job
+tasks:
+  - id: task1
+    type: command
+    command: echo
+  - id: task2
+    type: command
+    command: echo
+    depends_on: [task1]
+  - id: task3
+    type: command
+    command: echo
+    depends_on: [task2]
+  - id: task4
+    type: command
+    command: echo
+    depends_on: [task3, task1]
+  - id: task5
+    type: command
+    command: echo
+    depends_on: [task4]
+  - id: task6
+    type: command
+    command: echo
+    depends_on: [task5, task2]
+"#;
+        // This should pass - it's a valid DAG
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_error_three_way_cycle() {
+        let yaml = r#"
+id: three_way_cycle_job
+name: Three Way Cycle Job
+tasks:
+  - id: task1
+    type: command
+    command: echo
+    depends_on: [task3]
+  - id: task2
+    type: command
+    command: echo
+    depends_on: [task1]
+  - id: task3
+    type: command
+    command: echo
+    depends_on: [task2]
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("cycle detected"));
+            // All three tasks should be mentioned as part of the cycle
+            assert!(msg.contains("task1") || msg.contains("task2") || msg.contains("task3"));
+        }
+    }
+
+    #[test]
+    fn test_validation_valid_complex_dag() {
+        let yaml = r#"
+id: complex_dag_job
+name: Complex DAG Job
+tasks:
+  - id: extract1
+    type: command
+    command: ./extract1.sh
+  - id: extract2
+    type: command
+    command: ./extract2.sh
+  - id: transform1
+    type: command
+    command: ./transform1.sh
+    depends_on: [extract1]
+  - id: transform2
+    type: command
+    command: ./transform2.sh
+    depends_on: [extract2]
+  - id: merge
+    type: command
+    command: ./merge.sh
+    depends_on: [transform1, transform2]
+  - id: load
+    type: command
+    command: ./load.sh
+    depends_on: [merge]
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(result.is_ok());
     }
 }
