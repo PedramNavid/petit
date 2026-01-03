@@ -375,6 +375,12 @@ impl<S: Storage + 'static> Scheduler<S> {
     }
 
     /// Recover interrupted runs from storage.
+    ///
+    /// For each incomplete run:
+    /// - Marks the run as interrupted
+    /// - Updates pending/running task states to failed ("Run was interrupted")
+    /// - Leaves completed task states unchanged
+    /// - Logs warnings for any task state update failures (non-blocking)
     pub async fn recover(&self) -> Result<Vec<RunId>, SchedulerError> {
         let incomplete_runs = self.storage.get_incomplete_runs().await?;
         let mut recovered = Vec::new();
