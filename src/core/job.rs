@@ -100,6 +100,20 @@ pub struct Job {
     enabled: bool,
 }
 
+impl std::fmt::Debug for Job {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Job")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("schedule", &self.schedule)
+            .field("dag_id", self.dag.id())
+            .field("dependencies", &self.dependencies)
+            .field("max_concurrency", &self.max_concurrency)
+            .finish()
+    }
+}
+
 impl Job {
     /// Create a new job with the given ID, name, and DAG.
     pub fn new(id: impl Into<JobId>, name: impl Into<String>, dag: Dag) -> Self {
@@ -581,5 +595,27 @@ mod tests {
         let job = Job::new("multi_dep", "Multi Dep", dag).with_dependencies(deps);
 
         assert_eq!(job.dependencies().len(), 3);
+    }
+
+    #[test]
+    fn test_job_debug_implementation() {
+        let dag = create_simple_dag();
+        let schedule = Schedule::new("0 * * * *").unwrap();
+
+        let job = Job::new("debug_test", "Debug Test Job", dag)
+            .with_schedule(schedule)
+            .with_dependency(JobDependency::new(JobId::new("upstream")))
+            .with_max_concurrency(2)
+            .with_enabled(true);
+
+        let debug_str = format!("{:?}", job);
+
+        // Verify key fields are present in debug output
+        assert!(debug_str.contains("debug_test"));
+        assert!(debug_str.contains("Debug Test Job"));
+        assert!(debug_str.contains("enabled: true"));
+        assert!(debug_str.contains("test_dag")); // dag_id
+        assert!(debug_str.contains("upstream")); // dependency
+        assert!(debug_str.contains("max_concurrency: Some(2)"));
     }
 }
