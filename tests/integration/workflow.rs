@@ -2,11 +2,11 @@
 //!
 //! Tests that verify the full pipeline from job definition to execution.
 
+use async_trait::async_trait;
 use petit::{
     DagBuilder, DagExecutor, Event, EventBus, EventHandler, InMemoryStorage, Job, JobDependency,
     Schedule, Scheduler, Task, TaskCondition, TaskContext, TaskError, TaskId, YamlLoader,
 };
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -232,7 +232,10 @@ async fn test_complex_dag_with_mixed_conditions() {
     let result = executor.execute(&dag, &mut ctx).await;
 
     // Verify results
-    assert!(!result.success, "DAG should fail because 'failure' task failed");
+    assert!(
+        !result.success,
+        "DAG should fail because 'failure' task failed"
+    );
 
     // 'start' should complete
     assert_eq!(

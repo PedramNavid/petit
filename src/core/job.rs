@@ -312,7 +312,9 @@ impl JobBuilder {
 
     /// Build the job.
     pub fn build(self) -> Result<Job, JobError> {
-        let dag = self.dag.ok_or(JobError::InvalidDag("DAG is required".into()))?;
+        let dag = self
+            .dag
+            .ok_or(JobError::InvalidDag("DAG is required".into()))?;
 
         Ok(Job {
             id: self.id,
@@ -330,9 +332,9 @@ impl JobBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TaskContext;
     use crate::core::dag::DagBuilder;
     use crate::core::task::{Task, TaskError};
-    use crate::TaskContext;
     use async_trait::async_trait;
 
     struct DummyTask {

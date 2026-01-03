@@ -1,14 +1,14 @@
-//! Petit - A minimal, lightweight task orchestrator.
+//! petit - A minimal, lightweight task orchestrator.
 //!
 //! Usage:
-//!   petit run <jobs-dir>     Run the scheduler with jobs from the specified directory
-//!   petit validate <jobs-dir> Validate job configurations without running
-//!   petit list <jobs-dir>    List all jobs in the directory
+//!   pt run <jobs-dir>     Run the scheduler with jobs from the specified directory
+//!   pt validate <jobs-dir> Validate job configurations without running
+//!   pt list <jobs-dir>    List all jobs in the directory
 
 use clap::{Parser, Subcommand};
 use petit::{
-    load_jobs_from_directory, DagExecutor, EventBus, EventHandler, InMemoryStorage, Scheduler,
-    Storage,
+    DagExecutor, EventBus, EventHandler, InMemoryStorage, Scheduler, Storage,
+    load_jobs_from_directory,
 };
 
 #[cfg(feature = "api")]
@@ -21,9 +21,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
-/// Petit - A minimal, lightweight task orchestrator
+/// pt - A minimal, lightweight task orchestrator
 #[derive(Parser)]
-#[command(name = "petit")]
+#[command(name = "pt")]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]

@@ -406,7 +406,10 @@ enabled: true
 "#;
         let config = YamlLoader::parse_job_config(yaml).unwrap();
         assert_eq!(config.id, "full_job");
-        assert_eq!(config.description, Some("A job with all fields specified".to_string()));
+        assert_eq!(
+            config.description,
+            Some("A job with all fields specified".to_string())
+        );
         assert!(config.schedule.is_some());
         assert_eq!(config.tasks.len(), 3);
         assert_eq!(config.depends_on.len(), 1);
@@ -490,7 +493,10 @@ tasks:
         let retry = config.tasks[0].retry.as_ref().unwrap();
         assert_eq!(retry.max_attempts, 5);
         assert_eq!(retry.delay_secs, 30);
-        assert!(matches!(retry.condition, RetryConditionConfig::TransientOnly));
+        assert!(matches!(
+            retry.condition,
+            RetryConditionConfig::TransientOnly
+        ));
     }
 
     #[test]
@@ -559,21 +565,22 @@ tasks:
         // Detailed dependency with last_complete
         match &config.depends_on[1] {
             JobDependencyConfig::Detailed { condition, .. } => {
-                assert!(matches!(condition, JobDependencyConditionConfig::LastComplete));
+                assert!(matches!(
+                    condition,
+                    JobDependencyConditionConfig::LastComplete
+                ));
             }
             _ => panic!("Expected detailed dependency"),
         }
 
         // Detailed dependency with within_window
         match &config.depends_on[2] {
-            JobDependencyConfig::Detailed { condition, .. } => {
-                match condition {
-                    JobDependencyConditionConfig::WithinWindow { seconds } => {
-                        assert_eq!(*seconds, 3600);
-                    }
-                    _ => panic!("Expected WithinWindow condition"),
+            JobDependencyConfig::Detailed { condition, .. } => match condition {
+                JobDependencyConditionConfig::WithinWindow { seconds } => {
+                    assert_eq!(*seconds, 3600);
                 }
-            }
+                _ => panic!("Expected WithinWindow condition"),
+            },
             _ => panic!("Expected detailed dependency"),
         }
     }
@@ -740,7 +747,10 @@ tasks:
 "#;
         let config = YamlLoader::parse_job_config(yaml).unwrap();
         let env = &config.tasks[0].environment;
-        assert_eq!(env.get("DATABASE_URL"), Some(&"postgres://localhost/db".to_string()));
+        assert_eq!(
+            env.get("DATABASE_URL"),
+            Some(&"postgres://localhost/db".to_string())
+        );
         assert_eq!(env.get("API_KEY"), Some(&"secret123".to_string()));
         assert_eq!(env.get("DEBUG"), Some(&"true".to_string()));
     }

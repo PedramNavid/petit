@@ -265,7 +265,11 @@ impl Storage for SqliteStorage {
         .ok_or_else(|| StorageError::NotFound(format!("run: {}", id)))?;
 
         Ok(StoredRun {
-            id: RunId::from_uuid(row.0.parse().map_err(|e| StorageError::Other(format!("invalid uuid: {}", e)))?),
+            id: RunId::from_uuid(
+                row.0
+                    .parse()
+                    .map_err(|e| StorageError::Other(format!("invalid uuid: {}", e)))?,
+            ),
             job_id: JobId::new(row.1),
             status: string_to_run_status(&row.2),
             started_at: string_to_system_time(&row.3),
@@ -275,7 +279,11 @@ impl Storage for SqliteStorage {
         })
     }
 
-    async fn list_runs(&self, job_id: &JobId, limit: usize) -> Result<Vec<StoredRun>, StorageError> {
+    async fn list_runs(
+        &self,
+        job_id: &JobId,
+        limit: usize,
+    ) -> Result<Vec<StoredRun>, StorageError> {
         let rows: Vec<(
             String,
             String,
@@ -296,7 +304,11 @@ impl Storage for SqliteStorage {
         rows.into_iter()
             .map(|row| {
                 Ok(StoredRun {
-                    id: RunId::from_uuid(row.0.parse().map_err(|e| StorageError::Other(format!("invalid uuid: {}", e)))?),
+                    id: RunId::from_uuid(
+                        row.0
+                            .parse()
+                            .map_err(|e| StorageError::Other(format!("invalid uuid: {}", e)))?,
+                    ),
                     job_id: JobId::new(row.1),
                     status: string_to_run_status(&row.2),
                     started_at: string_to_system_time(&row.3),
@@ -350,7 +362,11 @@ impl Storage for SqliteStorage {
         rows.into_iter()
             .map(|row| {
                 Ok(StoredRun {
-                    id: RunId::from_uuid(row.0.parse().map_err(|e| StorageError::Other(format!("invalid uuid: {}", e)))?),
+                    id: RunId::from_uuid(
+                        row.0
+                            .parse()
+                            .map_err(|e| StorageError::Other(format!("invalid uuid: {}", e)))?,
+                    ),
                     job_id: JobId::new(row.1),
                     status: string_to_run_status(&row.2),
                     started_at: string_to_system_time(&row.3),
@@ -364,14 +380,13 @@ impl Storage for SqliteStorage {
 
     async fn mark_run_interrupted(&self, id: &RunId) -> Result<(), StorageError> {
         let now = system_time_to_string(SystemTime::now());
-        let result = sqlx::query(
-            "UPDATE runs SET status = 'interrupted', ended_at = ? WHERE id = ?",
-        )
-        .bind(&now)
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Other(e.to_string()))?;
+        let result =
+            sqlx::query("UPDATE runs SET status = 'interrupted', ended_at = ? WHERE id = ?")
+                .bind(&now)
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await
+                .map_err(|e| StorageError::Other(e.to_string()))?;
 
         if result.rows_affected() == 0 {
             return Err(StorageError::NotFound(format!("run: {}", id)));
@@ -434,7 +449,11 @@ impl Storage for SqliteStorage {
         .ok_or_else(|| StorageError::NotFound(format!("task_state: {}/{}", run_id, task_id)))?;
 
         Ok(StoredTaskState {
-            run_id: RunId::from_uuid(row.0.parse().map_err(|e| StorageError::Other(format!("invalid uuid: {}", e)))?),
+            run_id: RunId::from_uuid(
+                row.0
+                    .parse()
+                    .map_err(|e| StorageError::Other(format!("invalid uuid: {}", e)))?,
+            ),
             task_id: TaskId::new(row.1),
             status: string_to_task_status(&row.2),
             attempts: row.3 as u32,
@@ -466,7 +485,11 @@ impl Storage for SqliteStorage {
         rows.into_iter()
             .map(|row| {
                 Ok(StoredTaskState {
-                    run_id: RunId::from_uuid(row.0.parse().map_err(|e| StorageError::Other(format!("invalid uuid: {}", e)))?),
+                    run_id: RunId::from_uuid(
+                        row.0
+                            .parse()
+                            .map_err(|e| StorageError::Other(format!("invalid uuid: {}", e)))?,
+                    ),
                     task_id: TaskId::new(row.1),
                     status: string_to_task_status(&row.2),
                     attempts: row.3 as u32,
@@ -546,7 +569,11 @@ mod tests {
         // Create and save job
         {
             let storage = SqliteStorage::new(&db_path).await.unwrap();
-            let job = StoredJob::new(JobId::new("persist_test"), "Persist Test", DagId::new("dag"));
+            let job = StoredJob::new(
+                JobId::new("persist_test"),
+                "Persist Test",
+                DagId::new("dag"),
+            );
             storage.save_job(job).await.unwrap();
             storage.close().await;
         }
@@ -565,15 +592,27 @@ mod tests {
         let storage = create_test_storage().await;
 
         storage
-            .save_job(StoredJob::new(JobId::new("job1"), "Job 1", DagId::new("dag1")))
+            .save_job(StoredJob::new(
+                JobId::new("job1"),
+                "Job 1",
+                DagId::new("dag1"),
+            ))
             .await
             .unwrap();
         storage
-            .save_job(StoredJob::new(JobId::new("job2"), "Job 2", DagId::new("dag2")))
+            .save_job(StoredJob::new(
+                JobId::new("job2"),
+                "Job 2",
+                DagId::new("dag2"),
+            ))
             .await
             .unwrap();
         storage
-            .save_job(StoredJob::new(JobId::new("job3"), "Job 3", DagId::new("dag3")))
+            .save_job(StoredJob::new(
+                JobId::new("job3"),
+                "Job 3",
+                DagId::new("dag3"),
+            ))
             .await
             .unwrap();
 

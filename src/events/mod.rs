@@ -300,7 +300,9 @@ mod tests {
         let events = handler.events().await;
         assert_eq!(events.len(), 1);
         match &events[0] {
-            Event::TaskStarted { task_id, dag_id, .. } => {
+            Event::TaskStarted {
+                task_id, dag_id, ..
+            } => {
                 assert_eq!(task_id.as_str(), "extract");
                 assert_eq!(dag_id.as_str(), "etl");
             }
@@ -349,9 +351,7 @@ mod tests {
         let events = handler.events().await;
         assert_eq!(events.len(), 1);
         match &events[0] {
-            Event::TaskFailed {
-                task_id, error, ..
-            } => {
+            Event::TaskFailed { task_id, error, .. } => {
                 assert_eq!(task_id.as_str(), "load");
                 assert_eq!(error, "connection refused");
             }
@@ -619,11 +619,7 @@ mod tests {
     #[tokio::test]
     async fn test_task_failed_without_output() {
         // Verify that the basic constructor still works with None values
-        let event = Event::task_failed(
-            TaskId::new("task"),
-            DagId::new("dag"),
-            "error".to_string(),
-        );
+        let event = Event::task_failed(TaskId::new("task"), DagId::new("dag"), "error".to_string());
 
         match event {
             Event::TaskFailed {

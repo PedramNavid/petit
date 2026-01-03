@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::core::context::TaskContext;
@@ -118,17 +118,11 @@ enum SchedulerCommand {
         response: oneshot::Sender<Result<RunId, SchedulerError>>,
     },
     /// Pause the scheduler.
-    Pause {
-        response: oneshot::Sender<()>,
-    },
+    Pause { response: oneshot::Sender<()> },
     /// Resume the scheduler.
-    Resume {
-        response: oneshot::Sender<()>,
-    },
+    Resume { response: oneshot::Sender<()> },
     /// Shutdown the scheduler.
-    Shutdown {
-        response: oneshot::Sender<()>,
-    },
+    Shutdown { response: oneshot::Sender<()> },
 }
 
 /// Handle for controlling the scheduler.
@@ -150,9 +144,9 @@ impl SchedulerHandle {
             .await
             .map_err(|_| SchedulerError::ChannelError("failed to send trigger command".into()))?;
 
-        response_rx
-            .await
-            .map_err(|_| SchedulerError::ChannelError("failed to receive trigger response".into()))?
+        response_rx.await.map_err(|_| {
+            SchedulerError::ChannelError("failed to receive trigger response".into())
+        })?
     }
 
     /// Pause the scheduler.
@@ -184,9 +178,9 @@ impl SchedulerHandle {
             .await
             .map_err(|_| SchedulerError::ChannelError("failed to send resume command".into()))?;
 
-        response_rx
-            .await
-            .map_err(|_| SchedulerError::ChannelError("failed to receive resume response".into()))?;
+        response_rx.await.map_err(|_| {
+            SchedulerError::ChannelError("failed to receive resume response".into())
+        })?;
 
         Ok(())
     }
@@ -201,11 +195,9 @@ impl SchedulerHandle {
             .await
             .map_err(|_| SchedulerError::ChannelError("failed to send shutdown command".into()))?;
 
-        response_rx
-            .await
-            .map_err(|_| {
-                SchedulerError::ChannelError("failed to receive shutdown response".into())
-            })?;
+        response_rx.await.map_err(|_| {
+            SchedulerError::ChannelError("failed to receive shutdown response".into())
+        })?;
 
         Ok(())
     }
@@ -481,10 +473,7 @@ impl<S: Storage + 'static> Scheduler<S> {
                     }
                 }
                 DependencyCondition::LastComplete => {
-                    if !matches!(
-                        last_run.status,
-                        RunStatus::Completed | RunStatus::Failed
-                    ) {
+                    if !matches!(last_run.status, RunStatus::Completed | RunStatus::Failed) {
                         return false;
                     }
                 }
@@ -632,10 +621,7 @@ impl<S: Storage + 'static> Scheduler<S> {
     /// Count running instances of a specific job.
     async fn count_running_for_job(&self, job_id: &JobId) -> Result<usize, SchedulerError> {
         let running = self.running_jobs.read().await;
-        Ok(running
-            .values()
-            .filter(|(jid, _)| jid == job_id)
-            .count())
+        Ok(running.values().filter(|(jid, _)| jid == job_id).count())
     }
 
     /// Clean up finished job handles.
@@ -723,8 +709,7 @@ mod tests {
     #[tokio::test]
     async fn test_scheduler_triggers_job_at_scheduled_time() {
         let storage = InMemoryStorage::new();
-        let mut scheduler = Scheduler::new(storage)
-            .with_tick_interval(Duration::from_millis(50));
+        let mut scheduler = Scheduler::new(storage).with_tick_interval(Duration::from_millis(50));
 
         // Job that runs every second
         let job = create_scheduled_job("frequent", "Frequent Job", "@every 1s");
@@ -760,7 +745,10 @@ mod tests {
 
         // Try to trigger downstream - should fail because upstream hasn't run
         let result = handle.trigger("downstream").await;
-        assert!(matches!(result, Err(SchedulerError::DependencyNotSatisfied(_))));
+        assert!(matches!(
+            result,
+            Err(SchedulerError::DependencyNotSatisfied(_))
+        ));
 
         // Trigger upstream
         let upstream_run = handle.trigger("upstream").await.unwrap();
@@ -801,8 +789,7 @@ mod tests {
     #[tokio::test]
     async fn test_pause_and_resume_scheduler() {
         let storage = InMemoryStorage::new();
-        let scheduler = Scheduler::new(storage)
-            .with_tick_interval(Duration::from_millis(50));
+        let scheduler = Scheduler::new(storage).with_tick_interval(Duration::from_millis(50));
 
         let (handle, task) = scheduler.start().await;
 
@@ -964,9 +951,7 @@ mod tests {
         assert!(!events.is_empty());
 
         // Should have JobStarted and JobCompleted events
-        let has_started = events
-            .iter()
-            .any(|e| matches!(e, Event::JobStarted { .. }));
+        let has_started = events.iter().any(|e| matches!(e, Event::JobStarted { .. }));
         let has_completed = events
             .iter()
             .any(|e| matches!(e, Event::JobCompleted { .. }));
@@ -992,12 +977,10 @@ mod tests {
     #[tokio::test]
     async fn test_disabled_job_not_scheduled() {
         let storage = InMemoryStorage::new();
-        let mut scheduler = Scheduler::new(storage)
-            .with_tick_interval(Duration::from_millis(50));
+        let mut scheduler = Scheduler::new(storage).with_tick_interval(Duration::from_millis(50));
 
         // Disabled job with frequent schedule
-        let job = create_scheduled_job("disabled", "Disabled Job", "@every 1s")
-            .with_enabled(false);
+        let job = create_scheduled_job("disabled", "Disabled Job", "@every 1s").with_enabled(false);
         scheduler.register(job);
 
         let (handle, task) = scheduler.start().await;

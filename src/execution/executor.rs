@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
+use tracing::{Instrument, debug, info_span, warn};
 
 use crate::core::context::TaskContext;
 use crate::core::retry::RetryCondition;
-use crate::core::task::Task;
+use crate::core::task::{Task, TaskError};
 use crate::core::types::TaskId;
 
 /// Result of executing a task.
@@ -86,6 +87,19 @@ impl TaskExecutor {
         self.semaphore.available_permits()
     }
 
+    /// Close the executor's semaphore.
+    ///
+    /// This prevents any new tasks from being executed and causes pending
+    /// `execute` calls to return an error. Use this for graceful shutdown.
+    pub fn close(&self) {
+        self.semaphore.close();
+    }
+
+    /// Check if the executor's semaphore is closed.
+    pub fn is_closed(&self) -> bool {
+        self.semaphore.is_closed()
+    }
+
     /// Execute a task with retry logic.
     ///
     /// This method will:
@@ -93,53 +107,29 @@ impl TaskExecutor {
     /// 2. Execute the task
     /// 3. Retry on failure according to the task's retry policy
     /// 4. Return the result with attempt count and duration
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskError::ExecutionFailed` if the executor's semaphore is closed,
+    /// which can happen during graceful shutdown.
     pub async fn execute(
         &self,
         task: &dyn Task,
         ctx: &mut TaskContext,
-    ) -> TaskResult {
-        let task_id = TaskId::new(task.name());
-        let start_time = Instant::now();
-        let retry_policy = task.retry_policy();
+    ) -> Result<TaskResult, TaskError> {
+        let task_name = task.name();
+        debug!(task = %task_name, "acquiring execution permit");
 
         // Acquire semaphore permit for concurrency control
-        let _permit = self.semaphore.acquire().await.expect("semaphore closed");
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| TaskError::ExecutionFailed("executor semaphore closed".to_string()))?;
 
-        let mut attempts = 0u32;
+        debug!(task = %task_name, "permit acquired, starting execution");
 
-        // First attempt + retries
-        let max_attempts = retry_policy.max_attempts + 1; // +1 for initial attempt
-
-        loop {
-            attempts += 1;
-
-            match task.execute(ctx).await {
-                Ok(()) => {
-                    return TaskResult::success(task_id, attempts, start_time.elapsed());
-                }
-                Err(err) => {
-                    // Check if we should retry
-                    let should_retry = attempts < max_attempts && match retry_policy.retry_on {
-                        RetryCondition::Always => true,
-                        RetryCondition::TransientOnly => err.is_transient(),
-                        RetryCondition::Never => false,
-                    };
-
-                    if should_retry {
-                        // Wait before retrying
-                        sleep(retry_policy.delay).await;
-                    } else {
-                        // No more retries, return failure
-                        return TaskResult::failure(
-                            task_id,
-                            attempts,
-                            start_time.elapsed(),
-                            err.to_string(),
-                        );
-                    }
-                }
-            }
-        }
+        Ok(Self::execute_with_retry(task, ctx).await)
     }
 
     /// Execute a task without acquiring a semaphore permit.
@@ -150,33 +140,82 @@ impl TaskExecutor {
         task: &dyn Task,
         ctx: &mut TaskContext,
     ) -> TaskResult {
-        let task_id = TaskId::new(task.name());
+        let task_name = task.name();
+        debug!(task = %task_name, "starting execution (no permit required)");
+
+        Self::execute_with_retry(task, ctx).await
+    }
+
+    /// Core retry loop used by both execute methods.
+    async fn execute_with_retry(task: &dyn Task, ctx: &mut TaskContext) -> TaskResult {
+        let task_name = task.name().to_string();
+        let task_id = TaskId::new(&task_name);
         let start_time = Instant::now();
         let retry_policy = task.retry_policy();
 
-        let mut attempts = 0u32;
+        // max_attempts includes the initial attempt + retries
         let max_attempts = retry_policy.max_attempts + 1;
 
-        loop {
-            attempts += 1;
+        let span = info_span!(
+            "task_execution",
+            task = %task_name,
+            max_attempts = max_attempts,
+        );
+        let _enter = span.enter();
 
-            match task.execute(ctx).await {
+        for attempt in 1..=max_attempts {
+            let attempt_span = info_span!(
+                "task_attempt",
+                task = %task_name,
+                attempt = attempt,
+                max_attempts = max_attempts,
+            );
+
+            let result = async { task.execute(ctx).await }
+                .instrument(attempt_span)
+                .await;
+
+            match result {
                 Ok(()) => {
-                    return TaskResult::success(task_id, attempts, start_time.elapsed());
+                    debug!(
+                        task = %task_name,
+                        attempts = attempt,
+                        duration_ms = %start_time.elapsed().as_millis(),
+                        "task completed successfully"
+                    );
+                    return TaskResult::success(task_id, attempt, start_time.elapsed());
                 }
                 Err(err) => {
-                    let should_retry = attempts < max_attempts && match retry_policy.retry_on {
-                        RetryCondition::Always => true,
-                        RetryCondition::TransientOnly => err.is_transient(),
-                        RetryCondition::Never => false,
-                    };
+                    let can_retry = attempt < max_attempts
+                        && match retry_policy.retry_on {
+                            RetryCondition::Always => true,
+                            RetryCondition::TransientOnly => err.is_transient(),
+                            RetryCondition::Never => false,
+                        };
 
-                    if should_retry {
+                    if can_retry {
+                        let delay_ms = retry_policy.delay.as_millis();
+                        warn!(
+                            task = %task_name,
+                            attempt = attempt,
+                            max_attempts = max_attempts,
+                            error = %err,
+                            delay_ms = %delay_ms,
+                            is_transient = err.is_transient(),
+                            "task failed, retrying"
+                        );
                         sleep(retry_policy.delay).await;
                     } else {
+                        warn!(
+                            task = %task_name,
+                            attempts = attempt,
+                            error = %err,
+                            duration_ms = %start_time.elapsed().as_millis(),
+                            "task failed permanently"
+                        );
                         return TaskResult::failure(
                             task_id,
-                            attempts,
+                            attempt,
                             start_time.elapsed(),
                             err.to_string(),
                         );
@@ -184,6 +223,10 @@ impl TaskExecutor {
                 }
             }
         }
+
+        // This is unreachable because the loop always returns, but the compiler
+        // doesn't know that max_attempts >= 1
+        unreachable!("retry loop should always return")
     }
 }
 
@@ -391,7 +434,7 @@ mod tests {
         };
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(result.success);
         assert_eq!(result.attempts, 1);
@@ -407,7 +450,7 @@ mod tests {
         };
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(!result.success);
         assert_eq!(result.attempts, 1);
@@ -426,7 +469,7 @@ mod tests {
         );
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(result.success);
         assert_eq!(result.attempts, 3); // 2 failures + 1 success
@@ -444,13 +487,18 @@ mod tests {
         let mut ctx = create_test_context();
 
         let start = Instant::now();
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
         let elapsed = start.elapsed();
 
         assert!(result.success);
         assert_eq!(result.attempts, 2);
         // Should have waited at least the delay duration
-        assert!(elapsed >= delay, "Expected at least {:?}, got {:?}", delay, elapsed);
+        assert!(
+            elapsed >= delay,
+            "Expected at least {:?}, got {:?}",
+            delay,
+            elapsed
+        );
     }
 
     #[tokio::test]
@@ -462,7 +510,7 @@ mod tests {
         );
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(!result.success);
         assert_eq!(result.attempts, 3); // 1 initial + 2 retries
@@ -484,7 +532,7 @@ mod tests {
             };
             handles.push(tokio::spawn(async move {
                 let mut ctx = create_test_context();
-                executor.execute(&task, &mut ctx).await
+                executor.execute(&task, &mut ctx).await.unwrap()
             }));
         }
 
@@ -516,7 +564,7 @@ mod tests {
         );
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(result.success);
         assert_eq!(result.attempts, 3);
@@ -533,7 +581,7 @@ mod tests {
         };
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(!result.success);
         assert_eq!(result.attempts, 1); // No retries for non-transient errors
@@ -544,12 +592,11 @@ mod tests {
         let executor = TaskExecutor::new(4);
         let task = CountingTask::new(
             "no_retry_task",
-            RetryPolicy::fixed(5, Duration::from_millis(1))
-                .with_condition(RetryCondition::Never),
+            RetryPolicy::fixed(5, Duration::from_millis(1)).with_condition(RetryCondition::Never),
         );
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(!result.success);
         assert_eq!(result.attempts, 1); // No retries when condition is Never
@@ -565,7 +612,7 @@ mod tests {
         };
         let mut ctx = create_test_context();
 
-        let result = executor.execute(&task, &mut ctx).await;
+        let result = executor.execute(&task, &mut ctx).await.unwrap();
 
         assert!(result.success);
         assert!(result.duration >= Duration::from_millis(50));
@@ -584,5 +631,25 @@ mod tests {
         let executor = TaskExecutor::default();
 
         assert_eq!(executor.max_concurrency(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_execute_returns_error_when_semaphore_closed() {
+        let executor = TaskExecutor::new(4);
+        let task = SuccessTask {
+            name: "test_task".to_string(),
+        };
+        let mut ctx = create_test_context();
+
+        // Close the semaphore before executing
+        executor.close();
+        assert!(executor.is_closed());
+
+        // Execute should return an error, not panic
+        let result = executor.execute(&task, &mut ctx).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("executor semaphore closed"));
     }
 }

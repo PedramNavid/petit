@@ -312,11 +312,7 @@ impl DagBuilder {
     }
 
     /// Add a task with dependencies.
-    pub fn add_task_with_deps(
-        mut self,
-        task: Arc<dyn Task>,
-        depends_on: &[&str],
-    ) -> Self {
+    pub fn add_task_with_deps(mut self, task: Arc<dyn Task>, depends_on: &[&str]) -> Self {
         let task_id = TaskId::new(task.name());
         let _ = self.dag.add_task(task);
         for dep in depends_on {
@@ -342,7 +338,9 @@ impl DagBuilder {
 
     /// Add a dependency between tasks.
     pub fn add_dependency(mut self, from: &str, to: &str) -> Self {
-        let _ = self.dag.add_dependency(&TaskId::new(from), &TaskId::new(to));
+        let _ = self
+            .dag
+            .add_dependency(&TaskId::new(from), &TaskId::new(to));
         self
     }
 
@@ -428,8 +426,10 @@ mod tests {
         dag.add_task(TestTask::new("B")).unwrap();
         dag.add_task(TestTask::new("C")).unwrap();
 
-        dag.add_dependency(&TaskId::new("B"), &TaskId::new("A")).unwrap();
-        dag.add_dependency(&TaskId::new("C"), &TaskId::new("B")).unwrap();
+        dag.add_dependency(&TaskId::new("B"), &TaskId::new("A"))
+            .unwrap();
+        dag.add_dependency(&TaskId::new("C"), &TaskId::new("B"))
+            .unwrap();
 
         let order = dag.topological_sort().unwrap();
 
@@ -451,9 +451,12 @@ mod tests {
         dag.add_task(TestTask::new("C")).unwrap();
 
         // Create cycle: A -> B -> C -> A
-        dag.add_dependency(&TaskId::new("B"), &TaskId::new("A")).unwrap();
-        dag.add_dependency(&TaskId::new("C"), &TaskId::new("B")).unwrap();
-        dag.add_dependency(&TaskId::new("A"), &TaskId::new("C")).unwrap();
+        dag.add_dependency(&TaskId::new("B"), &TaskId::new("A"))
+            .unwrap();
+        dag.add_dependency(&TaskId::new("C"), &TaskId::new("B"))
+            .unwrap();
+        dag.add_dependency(&TaskId::new("A"), &TaskId::new("C"))
+            .unwrap();
 
         let result = dag.topological_sort();
         assert!(matches!(result, Err(DagError::CycleDetected(_))));
@@ -510,10 +513,14 @@ mod tests {
         dag.add_task(TestTask::new("C")).unwrap();
         dag.add_task(TestTask::new("D")).unwrap();
 
-        dag.add_dependency(&TaskId::new("B"), &TaskId::new("A")).unwrap();
-        dag.add_dependency(&TaskId::new("C"), &TaskId::new("A")).unwrap();
-        dag.add_dependency(&TaskId::new("D"), &TaskId::new("B")).unwrap();
-        dag.add_dependency(&TaskId::new("D"), &TaskId::new("C")).unwrap();
+        dag.add_dependency(&TaskId::new("B"), &TaskId::new("A"))
+            .unwrap();
+        dag.add_dependency(&TaskId::new("C"), &TaskId::new("A"))
+            .unwrap();
+        dag.add_dependency(&TaskId::new("D"), &TaskId::new("B"))
+            .unwrap();
+        dag.add_dependency(&TaskId::new("D"), &TaskId::new("C"))
+            .unwrap();
 
         // Initially, only A is ready
         let ready = dag.get_ready_tasks(&HashSet::new());
@@ -545,8 +552,10 @@ mod tests {
         dag.add_task(TestTask::new("B")).unwrap();
         dag.add_task(TestTask::new("C")).unwrap();
 
-        dag.add_dependency(&TaskId::new("B"), &TaskId::new("A")).unwrap();
-        dag.add_dependency(&TaskId::new("C"), &TaskId::new("A")).unwrap();
+        dag.add_dependency(&TaskId::new("B"), &TaskId::new("A"))
+            .unwrap();
+        dag.add_dependency(&TaskId::new("C"), &TaskId::new("A"))
+            .unwrap();
 
         let mut downstream = dag.get_downstream(&TaskId::new("A"));
         downstream.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -588,7 +597,8 @@ mod tests {
 
         dag.add_task(TestTask::new("A")).unwrap();
         dag.add_task(TestTask::new("B")).unwrap();
-        dag.add_dependency(&TaskId::new("B"), &TaskId::new("A")).unwrap();
+        dag.add_dependency(&TaskId::new("B"), &TaskId::new("A"))
+            .unwrap();
 
         assert!(dag.validate().is_ok());
     }

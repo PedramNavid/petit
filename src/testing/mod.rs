@@ -110,20 +110,23 @@ impl MockTaskContext {
 
     /// Get all keys that were written by the task.
     pub fn written_keys(&self) -> Vec<String> {
-        self.written_keys.read().unwrap_or_else(|_| panic!()).clone()
+        self.written_keys
+            .read()
+            .unwrap_or_else(|_| panic!())
+            .clone()
     }
 
     /// Get all keys that were read by the task.
     pub fn accessed_keys(&self) -> Vec<String> {
-        self.accessed_keys.read().unwrap_or_else(|_| panic!()).clone()
+        self.accessed_keys
+            .read()
+            .unwrap_or_else(|_| panic!())
+            .clone()
     }
 
     /// Get the underlying store as a HashMap.
     pub fn store(&self) -> HashMap<String, Value> {
-        self.store
-            .read()
-            .map(|s| s.clone())
-            .unwrap_or_default()
+        self.store.read().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Convert to a TaskContext for use in task execution.
@@ -174,7 +177,11 @@ impl FailingTask {
     }
 
     /// Create a task that fails with a custom error message.
-    pub fn with_error(name: impl Into<String>, fail_count: u32, message: impl Into<String>) -> Self {
+    pub fn with_error(
+        name: impl Into<String>,
+        fail_count: u32,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             failures_remaining: AtomicU32::new(fail_count),
@@ -511,7 +518,9 @@ impl<T: Task> Task for TrackedTask<T> {
 
         match &result {
             Ok(()) => {
-                self.tracker.record_complete(&task_id, start.elapsed()).await;
+                self.tracker
+                    .record_complete(&task_id, start.elapsed())
+                    .await;
             }
             Err(e) => {
                 self.tracker.record_failure(&task_id, e.to_string()).await;
@@ -669,7 +678,10 @@ impl TestHarness {
         // Extract final context
         let context = store.read().map(|s| s.clone()).unwrap_or_default();
 
-        TestResult { dag_result, context }
+        TestResult {
+            dag_result,
+            context,
+        }
     }
 
     /// Execute and assert success.
@@ -934,8 +946,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_harness_with_initial_context() {
-        let harness = TestHarness::new()
-            .with_context("initial.value", 21);
+        let harness = TestHarness::new().with_context("initial.value", 21);
 
         let dag = DagBuilder::new("test", "Test DAG")
             .add_task(TransformTask::new("transform", "initial.value"))
@@ -945,9 +956,9 @@ mod tests {
         let result = harness.execute(&dag).await;
 
         assert!(result.dag_result.success);
-        let output: i32 = serde_json::from_value(
-            result.context.get("transform.result").unwrap().clone()
-        ).unwrap();
+        let output: i32 =
+            serde_json::from_value(result.context.get("transform.result").unwrap().clone())
+                .unwrap();
         assert_eq!(output, 42);
     }
 
@@ -967,7 +978,9 @@ mod tests {
 
     impl SimpleTaskInner {
         fn new(name: &str) -> Self {
-            Self { name: name.to_string() }
+            Self {
+                name: name.to_string(),
+            }
         }
     }
 
@@ -991,7 +1004,10 @@ mod tests {
 
     impl SlowTaskInner {
         fn new(name: &str, duration: Duration) -> Self {
-            Self { name: name.to_string(), duration }
+            Self {
+                name: name.to_string(),
+                duration,
+            }
         }
     }
 
@@ -1037,14 +1053,18 @@ mod tests {
 
         let dag = DagBuilder::new("order_test", "Order Test DAG")
             .add_task(tracked(SimpleTaskInner::new("first"), &tracker))
-            .add_task_with_deps(tracked(SimpleTaskInner::new("second"), &tracker), &["first"])
+            .add_task_with_deps(
+                tracked(SimpleTaskInner::new("second"), &tracker),
+                &["first"],
+            )
             .build()
             .unwrap();
 
         let _ = harness.execute(&dag).await;
 
         // This should pass
-        harness.timeline()
+        harness
+            .timeline()
             .assert_start_order(&["first", "second"])
             .await
             .unwrap();
@@ -1064,13 +1084,15 @@ mod tests {
         let _ = harness.execute(&dag).await;
 
         // This should pass
-        harness.timeline()
+        harness
+            .timeline()
             .assert_started_before("early", "late")
             .await
             .unwrap();
 
         // This should fail
-        let result = harness.timeline()
+        let result = harness
+            .timeline()
             .assert_started_before("late", "early")
             .await;
         assert!(result.is_err());
@@ -1086,8 +1108,14 @@ mod tests {
         // A -> B, C (B and C should run concurrently after A)
         let dag = DagBuilder::new("concurrent_test", "Concurrent Test DAG")
             .add_task(tracked(SimpleTaskInner::new("a"), &tracker))
-            .add_task_with_deps(tracked(SlowTaskInner::new("b", Duration::from_millis(50)), &tracker), &["a"])
-            .add_task_with_deps(tracked(SlowTaskInner::new("c", Duration::from_millis(50)), &tracker), &["a"])
+            .add_task_with_deps(
+                tracked(SlowTaskInner::new("b", Duration::from_millis(50)), &tracker),
+                &["a"],
+            )
+            .add_task_with_deps(
+                tracked(SlowTaskInner::new("c", Duration::from_millis(50)), &tracker),
+                &["a"],
+            )
             .build()
             .unwrap();
 
@@ -1109,7 +1137,8 @@ mod tests {
 
         let _ = harness.execute(&dag).await;
 
-        let entries = harness.timeline()
+        let entries = harness
+            .timeline()
             .entries_for_task(&TaskId::new("target"))
             .await;
 
@@ -1140,14 +1169,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_harness_with_failure_injection() {
-        let harness = TestHarness::new()
-            .with_failures(
-                FailureInjection::new()
-                    .always_fail("will_fail")
-            );
+        let harness =
+            TestHarness::new().with_failures(FailureInjection::new().always_fail("will_fail"));
 
         // The failure injection is configured but the harness doesn't
         // automatically intercept tasks - this test verifies config works
-        assert!(harness.failure_injection.always_fail.contains(&"will_fail".to_string()));
+        assert!(
+            harness
+                .failure_injection
+                .always_fail
+                .contains(&"will_fail".to_string())
+        );
     }
 }

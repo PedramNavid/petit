@@ -87,7 +87,10 @@ impl Environment {
 
     /// Convert to a Vec of (key, value) pairs for use with Command.
     pub fn to_vec(&self) -> Vec<(String, String)> {
-        self.vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        self.vars
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     /// Iterate over the environment variables.
@@ -107,7 +110,10 @@ impl FromIterator<(String, String)> for Environment {
 impl<'a> FromIterator<(&'a str, &'a str)> for Environment {
     fn from_iter<I: IntoIterator<Item = (&'a str, &'a str)>>(iter: I) -> Self {
         Self {
-            vars: iter.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            vars: iter
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         }
     }
 }
@@ -159,9 +165,7 @@ mod tests {
 
     #[test]
     fn test_environment_merge() {
-        let mut base = Environment::new()
-            .with_var("A", "1")
-            .with_var("B", "2");
+        let mut base = Environment::new().with_var("A", "1").with_var("B", "2");
 
         let override_env = Environment::new()
             .with_var("B", "overridden")
@@ -176,12 +180,9 @@ mod tests {
 
     #[test]
     fn test_environment_merged_with() {
-        let base = Environment::new()
-            .with_var("A", "1")
-            .with_var("B", "2");
+        let base = Environment::new().with_var("A", "1").with_var("B", "2");
 
-        let other = Environment::new()
-            .with_var("B", "overridden");
+        let other = Environment::new().with_var("B", "overridden");
 
         let merged = base.merged_with(&other);
 
@@ -193,9 +194,7 @@ mod tests {
 
     #[test]
     fn test_environment_to_vec() {
-        let env = Environment::new()
-            .with_var("A", "1")
-            .with_var("B", "2");
+        let env = Environment::new().with_var("A", "1").with_var("B", "2");
 
         let vec = env.to_vec();
         assert_eq!(vec.len(), 2);
@@ -203,10 +202,9 @@ mod tests {
 
     #[test]
     fn test_environment_from_iterator() {
-        let env: Environment = vec![
-            ("KEY1", "value1"),
-            ("KEY2", "value2"),
-        ].into_iter().collect();
+        let env: Environment = vec![("KEY1", "value1"), ("KEY2", "value2")]
+            .into_iter()
+            .collect();
 
         assert_eq!(env.len(), 2);
         assert_eq!(env.get("KEY1"), Some("value1"));

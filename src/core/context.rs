@@ -3,7 +3,7 @@
 //! Tasks communicate via a shared key-value store. Upstream tasks write
 //! outputs that downstream tasks can read as inputs.
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

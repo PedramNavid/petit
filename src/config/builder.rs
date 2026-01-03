@@ -126,9 +126,7 @@ impl JobConfigBuilder {
                         .arg("-c")
                         .arg(script)
                 } else {
-                    CommandTask::builder("python")
-                        .name(&config.id)
-                        .arg(script)
+                    CommandTask::builder("python").name(&config.id).arg(script)
                 };
 
                 // Add environment variables

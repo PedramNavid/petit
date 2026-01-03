@@ -87,7 +87,11 @@ impl Storage for InMemoryStorage {
             .ok_or_else(|| StorageError::NotFound(format!("run: {}", id)))
     }
 
-    async fn list_runs(&self, job_id: &JobId, limit: usize) -> Result<Vec<StoredRun>, StorageError> {
+    async fn list_runs(
+        &self,
+        job_id: &JobId,
+        limit: usize,
+    ) -> Result<Vec<StoredRun>, StorageError> {
         let runs = self.runs.read().map_err(|_| StorageError::LockPoisoned)?;
         let mut result: Vec<_> = runs
             .values()
@@ -198,11 +202,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_and_retrieve_job() {
         let storage = InMemoryStorage::new();
-        let job = StoredJob::new(
-            JobId::new("etl_job"),
-            "Daily ETL",
-            DagId::new("etl_dag"),
-        );
+        let job = StoredJob::new(JobId::new("etl_job"), "Daily ETL", DagId::new("etl_dag"));
 
         storage.save_job(job.clone()).await.unwrap();
         let retrieved = storage.get_job(&JobId::new("etl_job")).await.unwrap();

@@ -285,7 +285,8 @@ pub trait Storage: Send + Sync {
 
     /// List runs for a job, ordered by start time descending.
     /// Returns at most `limit` runs.
-    async fn list_runs(&self, job_id: &JobId, limit: usize) -> Result<Vec<StoredRun>, StorageError>;
+    async fn list_runs(&self, job_id: &JobId, limit: usize)
+    -> Result<Vec<StoredRun>, StorageError>;
 
     /// Update run status.
     async fn update_run(&self, run: StoredRun) -> Result<(), StorageError>;

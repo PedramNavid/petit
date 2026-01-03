@@ -3,11 +3,11 @@
 //! Tests that verify the system can recover from interruptions
 //! and handle failed runs appropriately.
 
-use petit::{
-    DagBuilder, InMemoryStorage, Job, JobId, RunId, RunStatus, Scheduler, Storage, StoredRun,
-    Task, TaskContext, TaskError,
-};
 use async_trait::async_trait;
+use petit::{
+    DagBuilder, InMemoryStorage, Job, JobId, RunId, RunStatus, Scheduler, Storage, StoredRun, Task,
+    TaskContext, TaskError,
+};
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -2,13 +2,13 @@
 //!
 //! Tests that verify resource management and concurrency control.
 
+use async_trait::async_trait;
 use petit::{
     DagBuilder, DagExecutor, InMemoryStorage, Job, Scheduler, Task, TaskContext, TaskError, TaskId,
 };
-use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// Task that takes time to execute (for testing concurrency).
@@ -118,9 +118,21 @@ async fn test_parallel_execution_of_independent_tasks() {
     let start_order = Arc::new(AtomicU32::new(0));
 
     // Create 3 independent tasks
-    let task1 = SlowTask::new("task1", Duration::from_millis(100), Arc::clone(&start_order));
-    let task2 = SlowTask::new("task2", Duration::from_millis(100), Arc::clone(&start_order));
-    let task3 = SlowTask::new("task3", Duration::from_millis(100), Arc::clone(&start_order));
+    let task1 = SlowTask::new(
+        "task1",
+        Duration::from_millis(100),
+        Arc::clone(&start_order),
+    );
+    let task2 = SlowTask::new(
+        "task2",
+        Duration::from_millis(100),
+        Arc::clone(&start_order),
+    );
+    let task3 = SlowTask::new(
+        "task3",
+        Duration::from_millis(100),
+        Arc::clone(&start_order),
+    );
 
     let dag = DagBuilder::new("parallel", "Parallel DAG")
         .add_task(Arc::clone(&task1) as Arc<dyn Task>)

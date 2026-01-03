@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
+use tracing::{Instrument, debug, info_span};
 
 use crate::core::context::TaskContext;
 use crate::core::dag::{Dag, TaskCondition};
@@ -109,6 +110,18 @@ impl DagExecutor {
         ctx: &mut TaskContext,
         event_bus: Option<Arc<EventBus>>,
     ) -> DagResult {
+        let dag_id = dag.id().clone();
+        let task_count = dag.task_ids().len();
+
+        let span = info_span!(
+            "dag_execution",
+            dag = %dag_id,
+            task_count = task_count,
+        );
+        let _enter = span.enter();
+
+        debug!(dag = %dag_id, task_count = task_count, "starting DAG execution");
+
         let start_time = Instant::now();
 
         // Track task statuses
@@ -134,11 +147,15 @@ impl DagExecutor {
             if ready_tasks.is_empty() {
                 // Check if we're done or deadlocked
                 let statuses_read = statuses.read().await;
-                let all_done = statuses_read
-                    .values()
-                    .all(|s| matches!(s, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Skipped));
+                let all_done = statuses_read.values().all(|s| {
+                    matches!(
+                        s,
+                        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Skipped
+                    )
+                });
 
                 if all_done {
+                    debug!(dag = %dag_id, "all tasks completed");
                     break;
                 }
 
@@ -147,10 +164,17 @@ impl DagExecutor {
                 let skipped = self.skip_blocked_tasks(dag, &statuses).await;
                 if skipped == 0 {
                     // No progress possible, break to avoid infinite loop
+                    debug!(dag = %dag_id, "no progress possible, breaking execution loop");
                     break;
                 }
                 continue;
             }
+
+            debug!(
+                dag = %dag_id,
+                ready_count = ready_tasks.len(),
+                "dispatching ready tasks"
+            );
 
             // Execute ready tasks in parallel
             let mut handles = vec![];
@@ -165,100 +189,123 @@ impl DagExecutor {
                 let config = ctx.config.clone();
                 let event_bus = event_bus.clone();
 
-                handles.push(tokio::spawn(async move {
-                    // Mark as running
-                    {
-                        let mut statuses_write = statuses_clone.write().await;
-                        statuses_write.insert(task_id.clone(), TaskStatus::Running);
-                    }
+                let task_span = info_span!(
+                    "dag_task_dispatch",
+                    dag = %dag_id,
+                    task = %task_id,
+                );
 
-                    // Emit TaskStarted event
-                    if let Some(ref bus) = event_bus {
-                        bus.emit(Event::task_started(task_id.clone(), dag_id.clone()))
-                            .await;
-                    }
-
-                    // Get the task
-                    let node = dag_clone.get_task(&task_id).unwrap();
-                    let task = &node.task;
-
-                    // Create task context
-                    let task_store = Arc::new(std::sync::RwLock::new(
-                        store.clone_store().unwrap_or_default(),
-                    ));
-                    let mut task_ctx = TaskContext::new(task_store.clone(), task_id.clone(), config);
-
-                    // Execute (uses semaphore for concurrency control)
-                    let task_start = Instant::now();
-                    let result = executor.execute(task.as_ref(), &mut task_ctx).await;
-                    let task_duration = task_start.elapsed();
-
-                    // Merge outputs back to shared store
-                    if let Ok(outputs) = task_store.read() {
-                        for (key, value) in outputs.iter() {
-                            let _ = store.set_raw(key, value.clone());
+                handles.push(tokio::spawn(
+                    async move {
+                        // Mark as running
+                        {
+                            let mut statuses_write = statuses_clone.write().await;
+                            statuses_write.insert(task_id.clone(), TaskStatus::Running);
                         }
-                    }
 
-                    // Update status based on result
-                    let status = if result.success {
-                        TaskStatus::Completed
-                    } else {
-                        TaskStatus::Failed
-                    };
-                    {
-                        let mut statuses_write = statuses_clone.write().await;
-                        statuses_write.insert(task_id.clone(), status.clone());
-                    }
+                        // Emit TaskStarted event
+                        if let Some(ref bus) = event_bus {
+                            bus.emit(Event::task_started(task_id.clone(), dag_id.clone()))
+                                .await;
+                        }
 
-                    // Read stdout/stderr/exit_code from context
-                    let stdout: Option<String> = task_store
-                        .read()
-                        .ok()
-                        .and_then(|s| s.get(&format!("{}.stdout", task_id.as_str())).cloned())
-                        .and_then(|v| serde_json::from_value(v).ok());
-                    let stderr: Option<String> = task_store
-                        .read()
-                        .ok()
-                        .and_then(|s| s.get(&format!("{}.stderr", task_id.as_str())).cloned())
-                        .and_then(|v| serde_json::from_value(v).ok());
-                    let exit_code: Option<i32> = task_store
-                        .read()
-                        .ok()
-                        .and_then(|s| s.get(&format!("{}.exit_code", task_id.as_str())).cloned())
-                        .and_then(|v| serde_json::from_value(v).ok());
+                        // Get the task
+                        let node = dag_clone.get_task(&task_id).unwrap();
+                        let task = &node.task;
 
-                    // Emit TaskCompleted or TaskFailed event
-                    if let Some(ref bus) = event_bus {
-                        if result.success {
-                            bus.emit(Event::task_completed_with_output(
+                        // Create task context
+                        let task_store = Arc::new(std::sync::RwLock::new(
+                            store.clone_store().unwrap_or_default(),
+                        ));
+                        let mut task_ctx =
+                            TaskContext::new(task_store.clone(), task_id.clone(), config);
+
+                        // Execute (uses semaphore for concurrency control)
+                        let task_start = Instant::now();
+                        let result = match executor.execute(task.as_ref(), &mut task_ctx).await {
+                            Ok(result) => result,
+                            Err(e) => TaskResult::failure(
                                 task_id.clone(),
-                                dag_id,
-                                task_duration,
-                                stdout,
-                                stderr,
-                                exit_code,
-                            ))
-                            .await;
+                                0,
+                                task_start.elapsed(),
+                                e.to_string(),
+                            ),
+                        };
+                        let task_duration = task_start.elapsed();
+
+                        // Merge outputs back to shared store
+                        if let Ok(outputs) = task_store.read() {
+                            for (key, value) in outputs.iter() {
+                                let _ = store.set_raw(key, value.clone());
+                            }
+                        }
+
+                        // Update status based on result
+                        let status = if result.success {
+                            TaskStatus::Completed
                         } else {
-                            bus.emit(Event::task_failed_with_output(
-                                task_id.clone(),
-                                dag_id,
-                                result.error.clone().unwrap_or_else(|| "unknown error".to_string()),
-                                stdout,
-                                stderr,
-                                exit_code,
-                            ))
-                            .await;
+                            TaskStatus::Failed
+                        };
+                        {
+                            let mut statuses_write = statuses_clone.write().await;
+                            statuses_write.insert(task_id.clone(), status.clone());
+                        }
+
+                        // Read stdout/stderr/exit_code from context
+                        let stdout: Option<String> = task_store
+                            .read()
+                            .ok()
+                            .and_then(|s| s.get(&format!("{}.stdout", task_id.as_str())).cloned())
+                            .and_then(|v| serde_json::from_value(v).ok());
+                        let stderr: Option<String> = task_store
+                            .read()
+                            .ok()
+                            .and_then(|s| s.get(&format!("{}.stderr", task_id.as_str())).cloned())
+                            .and_then(|v| serde_json::from_value(v).ok());
+                        let exit_code: Option<i32> = task_store
+                            .read()
+                            .ok()
+                            .and_then(|s| {
+                                s.get(&format!("{}.exit_code", task_id.as_str())).cloned()
+                            })
+                            .and_then(|v| serde_json::from_value(v).ok());
+
+                        // Emit TaskCompleted or TaskFailed event
+                        if let Some(ref bus) = event_bus {
+                            if result.success {
+                                bus.emit(Event::task_completed_with_output(
+                                    task_id.clone(),
+                                    dag_id,
+                                    task_duration,
+                                    stdout,
+                                    stderr,
+                                    exit_code,
+                                ))
+                                .await;
+                            } else {
+                                bus.emit(Event::task_failed_with_output(
+                                    task_id.clone(),
+                                    dag_id,
+                                    result
+                                        .error
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown error".to_string()),
+                                    stdout,
+                                    stderr,
+                                    exit_code,
+                                ))
+                                .await;
+                            }
+                        }
+
+                        // Store result
+                        {
+                            let mut results_write = results_clone.write().await;
+                            results_write.insert(task_id.clone(), result);
                         }
                     }
-
-                    // Store result
-                    {
-                        let mut results_write = results_clone.write().await;
-                        results_write.insert(task_id.clone(), result);
-                    }
-                }));
+                    .instrument(task_span),
+                ));
             }
 
             // Wait for all tasks in this wave to complete
@@ -284,10 +331,21 @@ impl DagExecutor {
             .collect();
 
         let success = failed_tasks.is_empty() && skipped_tasks.is_empty();
+        let duration = start_time.elapsed();
+
+        debug!(
+            dag = %dag_id,
+            success = success,
+            duration_ms = %duration.as_millis(),
+            completed = results_final.len(),
+            failed = failed_tasks.len(),
+            skipped = skipped_tasks.len(),
+            "DAG execution completed"
+        );
 
         DagResult {
             success,
-            duration: start_time.elapsed(),
+            duration,
             task_results: results_final.clone(),
             task_statuses: statuses_final.clone(),
             failed_tasks,
@@ -315,7 +373,9 @@ impl DagExecutor {
             let deps_satisfied = deps.iter().all(|dep_id| {
                 matches!(
                     statuses_read.get(dep_id),
-                    Some(TaskStatus::Completed) | Some(TaskStatus::Failed) | Some(TaskStatus::Skipped)
+                    Some(TaskStatus::Completed)
+                        | Some(TaskStatus::Failed)
+                        | Some(TaskStatus::Skipped)
                 )
             });
 
@@ -344,24 +404,20 @@ impl DagExecutor {
     ) -> bool {
         match condition {
             TaskCondition::Always => true,
-            TaskCondition::AllSuccess => {
-                dependencies
-                    .iter()
-                    .all(|dep| statuses.get(dep) == Some(&TaskStatus::Completed))
-            }
-            TaskCondition::OnFailure => {
-                dependencies
-                    .iter()
-                    .any(|dep| statuses.get(dep) == Some(&TaskStatus::Failed))
-            }
-            TaskCondition::AllDone => {
-                dependencies.iter().all(|dep| {
-                    matches!(
-                        statuses.get(dep),
-                        Some(TaskStatus::Completed) | Some(TaskStatus::Failed) | Some(TaskStatus::Skipped)
-                    )
-                })
-            }
+            TaskCondition::AllSuccess => dependencies
+                .iter()
+                .all(|dep| statuses.get(dep) == Some(&TaskStatus::Completed)),
+            TaskCondition::OnFailure => dependencies
+                .iter()
+                .any(|dep| statuses.get(dep) == Some(&TaskStatus::Failed)),
+            TaskCondition::AllDone => dependencies.iter().all(|dep| {
+                matches!(
+                    statuses.get(dep),
+                    Some(TaskStatus::Completed)
+                        | Some(TaskStatus::Failed)
+                        | Some(TaskStatus::Skipped)
+                )
+            }),
         }
     }
 
@@ -386,7 +442,9 @@ impl DagExecutor {
             let deps_done = deps.iter().all(|dep_id| {
                 matches!(
                     statuses_write.get(dep_id),
-                    Some(TaskStatus::Completed) | Some(TaskStatus::Failed) | Some(TaskStatus::Skipped)
+                    Some(TaskStatus::Completed)
+                        | Some(TaskStatus::Failed)
+                        | Some(TaskStatus::Skipped)
                 )
             });
 
@@ -439,7 +497,9 @@ mod tests {
 
     impl SimpleTask {
         fn new(name: &str) -> Arc<Self> {
-            Arc::new(Self { name: name.to_string() })
+            Arc::new(Self {
+                name: name.to_string(),
+            })
         }
     }
 
@@ -462,7 +522,9 @@ mod tests {
 
     impl FailingTask {
         fn new(name: &str) -> Arc<Self> {
-            Arc::new(Self { name: name.to_string() })
+            Arc::new(Self {
+                name: name.to_string(),
+            })
         }
     }
 
@@ -473,7 +535,9 @@ mod tests {
         }
 
         async fn execute(&self, _ctx: &mut TaskContext) -> Result<(), TaskError> {
-            Err(TaskError::ExecutionFailed("intentional failure".to_string()))
+            Err(TaskError::ExecutionFailed(
+                "intentional failure".to_string(),
+            ))
         }
 
         fn retry_policy(&self) -> RetryPolicy {

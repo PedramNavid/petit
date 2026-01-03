@@ -172,8 +172,8 @@ mod tests {
 
     #[test]
     fn test_retry_condition_never() {
-        let policy = RetryPolicy::fixed(3, Duration::from_secs(1))
-            .with_condition(RetryCondition::Never);
+        let policy =
+            RetryPolicy::fixed(3, Duration::from_secs(1)).with_condition(RetryCondition::Never);
 
         // Even with max_attempts > 0, Never condition disables retries
         assert!(!policy.should_retry(1));
