@@ -146,6 +146,9 @@ impl MockTaskContext {
 ///
 /// Useful for testing retry logic and error handling.
 ///
+/// This task is safe for concurrent execution - the failure counting is
+/// protected by a mutex to ensure deterministic behavior.
+///
 /// # Example
 ///
 /// ```
@@ -156,11 +159,17 @@ impl MockTaskContext {
 /// ```
 pub struct FailingTask {
     name: String,
-    failures_remaining: AtomicU32,
+    /// Mutex protecting failure state to prevent race conditions under concurrent execution.
+    state: Mutex<FailingTaskState>,
     total_failures: u32,
-    call_count: AtomicU32,
     error_message: String,
     retry_policy: RetryPolicy,
+}
+
+/// Internal state for FailingTask, protected by a mutex.
+struct FailingTaskState {
+    failures_remaining: u32,
+    call_count: u32,
 }
 
 impl FailingTask {
@@ -168,9 +177,11 @@ impl FailingTask {
     pub fn new(name: impl Into<String>, fail_count: u32) -> Self {
         Self {
             name: name.into(),
-            failures_remaining: AtomicU32::new(fail_count),
+            state: Mutex::new(FailingTaskState {
+                failures_remaining: fail_count,
+                call_count: 0,
+            }),
             total_failures: fail_count,
-            call_count: AtomicU32::new(0),
             error_message: "intentional test failure".to_string(),
             retry_policy: RetryPolicy::none(),
         }
@@ -184,9 +195,11 @@ impl FailingTask {
     ) -> Self {
         Self {
             name: name.into(),
-            failures_remaining: AtomicU32::new(fail_count),
+            state: Mutex::new(FailingTaskState {
+                failures_remaining: fail_count,
+                call_count: 0,
+            }),
             total_failures: fail_count,
-            call_count: AtomicU32::new(0),
             error_message: message.into(),
             retry_policy: RetryPolicy::none(),
         }
@@ -199,20 +212,26 @@ impl FailingTask {
     }
 
     /// Get the number of failures remaining before success.
-    pub fn failures_remaining(&self) -> u32 {
-        self.failures_remaining.load(Ordering::SeqCst)
+    ///
+    /// Note: This is an async method because it acquires a lock.
+    pub async fn failures_remaining(&self) -> u32 {
+        self.state.lock().await.failures_remaining
     }
 
     /// Get the number of times this task has been called.
-    pub fn call_count(&self) -> u32 {
-        self.call_count.load(Ordering::SeqCst)
+    ///
+    /// Note: This is an async method because it acquires a lock.
+    pub async fn call_count(&self) -> u32 {
+        self.state.lock().await.call_count
     }
 
     /// Reset the failure counter for reuse.
-    pub fn reset(&self) {
-        self.failures_remaining
-            .store(self.total_failures, Ordering::SeqCst);
-        self.call_count.store(0, Ordering::SeqCst);
+    ///
+    /// Note: This is an async method because it acquires a lock.
+    pub async fn reset(&self) {
+        let mut state = self.state.lock().await;
+        state.failures_remaining = self.total_failures;
+        state.call_count = 0;
     }
 }
 
@@ -223,15 +242,15 @@ impl Task for FailingTask {
     }
 
     async fn execute(&self, ctx: &mut TaskContext) -> Result<(), TaskError> {
+        // Lock the state to ensure atomic check-and-decrement under concurrent execution
+        let mut state = self.state.lock().await;
+
         // Track call count
-        self.call_count.fetch_add(1, Ordering::SeqCst);
+        state.call_count += 1;
 
-        // Load current value first to avoid underflow
-        let remaining = self.failures_remaining.load(Ordering::SeqCst);
-
-        if remaining > 0 {
+        if state.failures_remaining > 0 {
             // Decrement and fail
-            self.failures_remaining.fetch_sub(1, Ordering::SeqCst);
+            state.failures_remaining -= 1;
             Err(TaskError::ExecutionFailed(self.error_message.clone()))
         } else {
             // No failures remaining, succeed
@@ -845,17 +864,17 @@ mod tests {
         // First call - fails
         let result1 = task.execute(&mut ctx).await;
         assert!(result1.is_err());
-        assert_eq!(task.call_count(), 1);
+        assert_eq!(task.call_count().await, 1);
 
         // Second call - fails
         let result2 = task.execute(&mut ctx).await;
         assert!(result2.is_err());
-        assert_eq!(task.call_count(), 2);
+        assert_eq!(task.call_count().await, 2);
 
         // Third call - succeeds
         let result3 = task.execute(&mut ctx).await;
         assert!(result3.is_ok());
-        assert_eq!(task.call_count(), 3);
+        assert_eq!(task.call_count().await, 3);
     }
 
     #[tokio::test]
@@ -884,7 +903,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Reset and fail again
-        task.reset();
+        task.reset().await;
         let result = task.execute(&mut ctx).await;
         assert!(result.is_err());
     }
