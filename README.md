@@ -2,6 +2,23 @@
 
 A minimal, lightweight task orchestrator with cron-like scheduling, written in Rust.
 
+## What .. and why?
+
+I wanted something to orchestrate simple tasks on embedded hardware (Turing PI cluster with RK1 and Raspberry PIs). Low-memory and efficiency were important, but I also wanted something that was usable and friendly.
+
+Importantly, I needed
+
+- Tasks and Jobs that can form dependencies
+- Simple observability
+- Concurrency
+- YAML configuration
+
+And so I built this.
+
+## Should I use this?
+
+No! I built this to see what it would take to build an orchestrator with Claude Code using Opus 4.5. It works for me but please do not use it for you.
+
 ## Features
 
 - **DAG-based execution** — Define task dependencies; independent tasks run in parallel
@@ -21,9 +38,14 @@ cargo install --path .
 
 # With SQLite support
 cargo install --path . --features sqlite
+
+# With TUI support
+cargo install --path . --features tui,sqlite
 ```
 
 ## Quick Start
+
+There are example jobs in ./examples. You can use those or follow these instructions:
 
 ### 1. Create a job file
 
@@ -42,22 +64,30 @@ tasks:
 ### 2. Run the scheduler
 
 ```bash
-petit run jobs/
+pt run jobs/
 ```
 
 ### 3. Or trigger a job manually
 
 ```bash
-petit trigger jobs/ hello_world
+pt trigger jobs/ hello_world
+```
+
+### 4. Run with a database
+
+By default, this runs in-memory with no persistence!
+
+```bash
+pt trigger jobs/ hello_world --db petit.db
 ```
 
 ## CLI Commands
 
 ```
-petit run <jobs-dir>       # Run scheduler with jobs from directory
-petit validate <jobs-dir>  # Validate job configurations
-petit list <jobs-dir>      # List all jobs
-petit trigger <jobs-dir> <job-id>  # Trigger a job manually
+pt run <jobs-dir>       # Run scheduler with jobs from directory
+pt validate <jobs-dir>  # Validate job configurations
+pt list <jobs-dir>      # List all jobs
+pt trigger <jobs-dir> <job-id>  # Trigger a job manually
 ```
 
 ### Options for `run`
@@ -138,144 +168,6 @@ depends_on:
     condition: last_success # last_success | last_complete | within_window
 ```
 
-## Library Usage
-
-Use Petit as a library in your Rust application:
-
-```rust
-use petit::{
-    Job, DagBuilder, CommandTask, Schedule,
-    Scheduler, InMemoryStorage, EventBus, DagExecutor,
-};
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Build a DAG
-    let dag = DagBuilder::new("pipeline", "ETL Pipeline")
-        .add_task(Arc::new(
-            CommandTask::builder("echo")
-                .name("extract")
-                .args(["Extracting..."])
-                .build()
-        ))
-        .add_task_with_deps(
-            Arc::new(
-                CommandTask::builder("echo")
-                    .name("transform")
-                    .args(["Transforming..."])
-                    .build()
-            ),
-            &["extract"],
-        )
-        .build()?;
-
-    // Create a job
-    let job = Job::new("etl", "ETL Job", dag)
-        .with_schedule(Schedule::new("0 */5 * * * *")?);  // Every 5 minutes
-
-    // Set up scheduler
-    let storage = InMemoryStorage::new();
-    let mut scheduler = Scheduler::new(storage)
-        .with_dag_executor(DagExecutor::with_concurrency(4));
-
-    scheduler.register(job);
-
-    // Start
-    let (handle, task) = scheduler.start().await;
-
-    // Trigger manually
-    handle.trigger("etl").await?;
-
-    // Shutdown
-    handle.shutdown().await?;
-
-    Ok(())
-}
-```
-
-### CommandTask
-
-`CommandTask` executes external commands with support for timeouts, environment variables, and retry policies:
-
-```rust
-use petit::{CommandTask, Environment, RetryPolicy};
-use std::time::Duration;
-
-// Simple command
-let task = CommandTask::builder("echo")
-    .arg("hello")
-    .build();
-
-// Command with all options
-let task = CommandTask::builder("python")
-    .name("process_data")
-    .args(["-m", "etl.process", "--batch-size", "1000"])
-    .env("DATABASE_URL", "postgres://localhost/db")
-    .env("LOG_LEVEL", "info")
-    .working_dir("/app")
-    .timeout(Duration::from_secs(300))
-    .retry_policy(RetryPolicy::fixed(3, Duration::from_secs(10)))
-    .build();
-
-// Using Environment object for multiple variables
-let env = Environment::new()
-    .with_var("AWS_REGION", "us-east-1")
-    .with_var("S3_BUCKET", "my-bucket");
-
-let task = CommandTask::builder("aws")
-    .args(["s3", "sync", ".", "s3://my-bucket"])
-    .environment(env)
-    .timeout(Duration::from_secs(600))
-    .build();
-```
-
-**Timeout Handling**: When a timeout occurs, the task returns a transient error that can trigger retries if configured.
-
-**Output Capture**: stdout and stderr are captured and stored in the task context as `{task_name}.stdout` and `{task_name}.stderr`, accessible by downstream tasks.
-
-### Custom Event Handler
-
-```rust
-use petit::{Event, EventHandler, EventBus};
-use async_trait::async_trait;
-
-struct MyHandler;
-
-#[async_trait]
-impl EventHandler for MyHandler {
-    async fn handle(&self, event: &Event) {
-        match event {
-            Event::JobCompleted { job_id, success, duration, .. } => {
-                println!("Job {} finished: success={}, took {:?}", job_id, success, duration);
-            }
-            Event::TaskFailed { task_id, error, .. } => {
-                eprintln!("Task {} failed: {}", task_id, error);
-            }
-            _ => {}
-        }
-    }
-}
-
-// Register handler
-let event_bus = EventBus::new();
-event_bus.register(Arc::new(MyHandler)).await;
-```
-
-### SQLite Storage
-
-Enable persistent storage with the `sqlite` feature:
-
-```rust
-use petit::SqliteStorage;
-
-let storage = SqliteStorage::new("petit.db").await?;
-// or in-memory for testing:
-let storage = SqliteStorage::in_memory().await?;
-
-let scheduler = Scheduler::new(storage);
-```
-
 ## Architecture
 
 ```
@@ -328,3 +220,7 @@ RUST_LOG=debug cargo run -- run examples/jobs/
 ## License
 
 MIT
+
+```
+
+```
