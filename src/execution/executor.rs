@@ -14,7 +14,8 @@ use tracing::{Instrument, debug, info_span, warn};
 use crate::core::context::TaskContext;
 use crate::core::retry::RetryCondition;
 use crate::core::task::{Task, TaskError};
-use crate::core::types::TaskId;
+use crate::core::types::{DagId, TaskId};
+use crate::events::{Event, EventBus};
 
 /// Result of executing a task.
 #[derive(Debug, Clone)]
@@ -117,6 +118,25 @@ impl TaskExecutor {
         task: &dyn Task,
         ctx: &mut TaskContext,
     ) -> Result<TaskResult, TaskError> {
+        self.execute_with_events(task, ctx, None, None).await
+    }
+
+    /// Execute a task with retry logic and optional event emission.
+    ///
+    /// Similar to `execute`, but emits `TaskRetrying` events when an event bus
+    /// and dag_id are provided.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TaskError::ExecutionFailed` if the executor's semaphore is closed,
+    /// which can happen during graceful shutdown.
+    pub async fn execute_with_events(
+        &self,
+        task: &dyn Task,
+        ctx: &mut TaskContext,
+        event_bus: Option<Arc<EventBus>>,
+        dag_id: Option<DagId>,
+    ) -> Result<TaskResult, TaskError> {
         let task_name = task.name();
         debug!(task = %task_name, "acquiring execution permit");
 
@@ -129,7 +149,7 @@ impl TaskExecutor {
 
         debug!(task = %task_name, "permit acquired, starting execution");
 
-        Ok(Self::execute_with_retry(task, ctx).await)
+        Ok(Self::execute_with_retry(task, ctx, event_bus, dag_id).await)
     }
 
     /// Execute a task without acquiring a semaphore permit.
@@ -143,11 +163,16 @@ impl TaskExecutor {
         let task_name = task.name();
         debug!(task = %task_name, "starting execution (no permit required)");
 
-        Self::execute_with_retry(task, ctx).await
+        Self::execute_with_retry(task, ctx, None, None).await
     }
 
     /// Core retry loop used by both execute methods.
-    async fn execute_with_retry(task: &dyn Task, ctx: &mut TaskContext) -> TaskResult {
+    async fn execute_with_retry(
+        task: &dyn Task,
+        ctx: &mut TaskContext,
+        event_bus: Option<Arc<EventBus>>,
+        dag_id: Option<DagId>,
+    ) -> TaskResult {
         let task_name = task.name().to_string();
         let task_id = TaskId::new(&task_name);
         let start_time = Instant::now();
@@ -204,6 +229,18 @@ impl TaskExecutor {
                             is_transient = err.is_transient(),
                             "task failed, retrying"
                         );
+
+                        // Emit TaskRetrying event if event bus is available
+                        if let (Some(bus), Some(dag)) = (&event_bus, &dag_id) {
+                            bus.emit(Event::task_retrying(
+                                task_id.clone(),
+                                dag.clone(),
+                                attempt,
+                                max_attempts,
+                            ))
+                            .await;
+                        }
+
                         sleep(retry_policy.delay).await;
                     } else {
                         warn!(
@@ -651,5 +688,96 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("executor semaphore closed"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_events_emits_task_retrying() {
+        use crate::core::types::DagId;
+        use crate::events::{Event, EventBus, EventHandler};
+        use tokio::sync::Mutex;
+
+        // Recording handler to capture events
+        struct RecordingHandler {
+            events: Mutex<Vec<Event>>,
+        }
+
+        impl RecordingHandler {
+            fn new() -> Self {
+                Self {
+                    events: Mutex::new(Vec::new()),
+                }
+            }
+
+            async fn events(&self) -> Vec<Event> {
+                self.events.lock().await.clone()
+            }
+        }
+
+        #[async_trait]
+        impl EventHandler for RecordingHandler {
+            async fn handle(&self, event: &Event) {
+                self.events.lock().await.push(event.clone());
+            }
+        }
+
+        let executor = TaskExecutor::new(4);
+        // Task that fails twice then succeeds - with 3 max_attempts, should succeed on 3rd try
+        let task = EventuallySucceedsTask::new(
+            "retrying_task",
+            2, // fail 2 times
+            RetryPolicy::fixed(3, Duration::from_millis(10)),
+        );
+        let mut ctx = create_test_context();
+
+        // Set up event bus
+        let handler = Arc::new(RecordingHandler::new());
+        let bus = Arc::new(EventBus::new());
+        bus.register(handler.clone()).await;
+
+        let dag_id = DagId::new("test_dag");
+        let result = executor
+            .execute_with_events(&task, &mut ctx, Some(bus), Some(dag_id.clone()))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.attempts, 3); // 2 failures + 1 success
+
+        // Verify TaskRetrying events were emitted
+        let events = handler.events().await;
+        assert_eq!(events.len(), 2); // Two retry events (after attempt 1 and 2)
+
+        // Check first retry event (after initial attempt failed)
+        match &events[0] {
+            Event::TaskRetrying {
+                task_id,
+                dag_id: event_dag_id,
+                attempt,
+                max_attempts,
+                ..
+            } => {
+                assert_eq!(task_id.as_str(), "retrying_task");
+                assert_eq!(event_dag_id.as_str(), "test_dag");
+                assert_eq!(*attempt, 1); // First attempt (initial) just failed
+                // max_attempts = RetryPolicy.max_attempts (3) + 1 initial = 4 total
+                assert_eq!(*max_attempts, 4);
+            }
+            _ => panic!("Expected TaskRetrying event"),
+        }
+
+        // Check second retry event (after first retry failed)
+        match &events[1] {
+            Event::TaskRetrying {
+                task_id,
+                attempt,
+                max_attempts,
+                ..
+            } => {
+                assert_eq!(task_id.as_str(), "retrying_task");
+                assert_eq!(*attempt, 2); // Second attempt (first retry) just failed
+                assert_eq!(*max_attempts, 4);
+            }
+            _ => panic!("Expected TaskRetrying event"),
+        }
     }
 }

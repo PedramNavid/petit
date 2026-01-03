@@ -43,10 +43,21 @@ pub enum Event {
     },
 
     /// A task is being retried after failure.
+    ///
+    /// This event is emitted immediately before the retry delay, allowing
+    /// consumers to observe retries in real-time.
+    ///
+    /// Note: `max_attempts` represents the total number of attempts including
+    /// the initial attempt (i.e., `RetryPolicy.max_attempts + 1`). For example,
+    /// if `RetryPolicy.max_attempts = 3` (meaning 3 retries), then `max_attempts`
+    /// in this event will be 4 (1 initial + 3 retries).
     TaskRetrying {
         task_id: TaskId,
         dag_id: DagId,
+        /// The attempt number that just failed (1-indexed).
+        /// For example, attempt=1 means the initial attempt failed.
         attempt: u32,
+        /// Total number of attempts that will be made, including the initial attempt.
         max_attempts: u32,
         timestamp: Instant,
     },

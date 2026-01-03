@@ -221,8 +221,17 @@ impl DagExecutor {
                             TaskContext::new(task_store.clone(), task_id.clone(), config);
 
                         // Execute (uses semaphore for concurrency control)
+                        // Pass event bus and dag_id to emit TaskRetrying events during retries
                         let task_start = Instant::now();
-                        let result = match executor.execute(task.as_ref(), &mut task_ctx).await {
+                        let result = match executor
+                            .execute_with_events(
+                                task.as_ref(),
+                                &mut task_ctx,
+                                event_bus.clone(),
+                                Some(dag_id.clone()),
+                            )
+                            .await
+                        {
                             Ok(result) => result,
                             Err(e) => TaskResult::failure(
                                 task_id.clone(),

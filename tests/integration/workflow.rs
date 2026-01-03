@@ -499,3 +499,122 @@ async fn test_multiple_concurrent_jobs() {
     handle.shutdown().await.unwrap();
     let _ = task.await;
 }
+
+/// Task that fails N times then succeeds (for retry testing).
+struct RetryingTask {
+    name: String,
+    failures_remaining: std::sync::atomic::AtomicU32,
+    retry_policy: petit::RetryPolicy,
+}
+
+impl RetryingTask {
+    fn new(name: &str, fail_count: u32) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            failures_remaining: std::sync::atomic::AtomicU32::new(fail_count),
+            retry_policy: petit::RetryPolicy::fixed(3, Duration::from_millis(10)),
+        })
+    }
+}
+
+#[async_trait]
+impl Task for RetryingTask {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn execute(&self, _ctx: &mut TaskContext) -> Result<(), TaskError> {
+        let remaining = self
+            .failures_remaining
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        if remaining > 0 {
+            Err(TaskError::ExecutionFailed(format!(
+                "failing, {} more to go",
+                remaining - 1
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn retry_policy(&self) -> petit::RetryPolicy {
+        self.retry_policy.clone()
+    }
+}
+
+/// Test: TaskRetrying events are emitted during retry attempts.
+#[tokio::test]
+async fn test_task_retrying_events_emitted() {
+    // Build a DAG with a task that fails twice then succeeds
+    let dag = DagBuilder::new("retry_dag", "Retry Test DAG")
+        .add_task(RetryingTask::new("retrying_task", 2))
+        .build()
+        .unwrap();
+
+    let job = Job::new("retry_job", "Retry Job", dag);
+
+    // Set up scheduler with event handler
+    let event_bus = EventBus::new();
+    let handler = RecordingHandler::new();
+    event_bus.register(handler.clone()).await;
+
+    let storage = InMemoryStorage::new();
+    let mut scheduler = Scheduler::new(storage).with_event_bus(event_bus);
+    scheduler.register(job);
+
+    let (handle, task) = scheduler.start().await;
+    let _run_id = handle.trigger("retry_job").await.unwrap();
+
+    // Wait for execution (including retry delays)
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Verify events
+    let events = handler.events().await;
+
+    // Count TaskRetrying events
+    let retry_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::TaskRetrying { .. }))
+        .collect();
+
+    // Should have 2 retry events (after attempt 1 and 2 failed)
+    assert_eq!(
+        retry_events.len(),
+        2,
+        "Expected 2 TaskRetrying events, got {}",
+        retry_events.len()
+    );
+
+    // Verify retry event details
+    if let Event::TaskRetrying {
+        task_id,
+        attempt,
+        max_attempts,
+        ..
+    } = &retry_events[0]
+    {
+        assert_eq!(task_id.as_str(), "retrying_task");
+        assert_eq!(*attempt, 1); // First attempt failed
+        assert_eq!(*max_attempts, 4); // 1 initial + 3 retries
+    }
+
+    if let Event::TaskRetrying { attempt, .. } = &retry_events[1] {
+        assert_eq!(*attempt, 2); // Second attempt failed
+    }
+
+    // Job should have completed successfully (task succeeded on 3rd attempt)
+    let completed = events
+        .iter()
+        .find(|e| matches!(e, Event::JobCompleted { .. }))
+        .expect("Should have JobCompleted event");
+
+    if let Event::JobCompleted { success, .. } = completed {
+        assert!(
+            *success,
+            "Job should have completed successfully after retries"
+        );
+    }
+
+    handle.shutdown().await.unwrap();
+    let _ = task.await;
+}
