@@ -137,3 +137,5 @@ When running with `--api`, the following endpoints are available:
 | `/api/jobs/{id}/runs` | GET | List runs for a job |
 | `/api/runs/{id}` | GET | Get run details |
 | `/api/runs/{id}/tasks` | GET | List task states for a run |
+
+**Security Note**: The API does not include built-in authentication. It binds to `127.0.0.1` by default for local-only access. For production deployments, secure the API using network isolation, reverse proxy authentication, or firewall rules. See `api.md` for detailed security recommendations.

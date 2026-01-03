@@ -87,6 +87,129 @@ Run HTTP server as separate tokio task alongside scheduler.
 | `src/scheduler/engine.rs` | Refactor to use `Arc<S>` |
 | `Cargo.toml` | Add axum, tower-http |
 
+## Security Considerations
+
+**IMPORTANT**: The Petit API does not include built-in authentication or authorization. It is designed to run as a local service for trusted environments.
+
+### Production Deployment
+
+For production use, you should secure the API using one or more of the following approaches:
+
+#### 1. Network Isolation (Recommended)
+
+Bind the API to localhost only and use SSH tunneling or a VPN for remote access:
+
+```bash
+# Bind to localhost (default)
+petit run jobs/ --api-host 127.0.0.1 --api-port 8565
+
+# Access remotely via SSH tunnel
+ssh -L 8565:localhost:8565 user@remote-host
+```
+
+This is the **most secure** approach as the API is never exposed to the network.
+
+#### 2. Reverse Proxy with Authentication
+
+Use a reverse proxy (nginx, Caddy, Traefik) with authentication:
+
+**nginx example with basic auth:**
+```nginx
+server {
+    listen 443 ssl;
+    server_name scheduler.example.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    auth_basic "Scheduler API";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8565;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+**Caddy example with authentication:**
+```
+scheduler.example.com {
+    basicauth /* {
+        user $2a$14$hashed_password
+    }
+    reverse_proxy localhost:8565
+}
+```
+
+#### 3. Firewall Rules
+
+Restrict access to the API port using firewall rules:
+
+```bash
+# Allow only specific IP addresses
+sudo ufw allow from 192.168.1.0/24 to any port 8565
+
+# Or use iptables
+sudo iptables -A INPUT -p tcp -s 192.168.1.0/24 --dport 8565 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 8565 -j DROP
+```
+
+#### 4. Container Network Policies
+
+When running in containers (Docker, Kubernetes), use network policies to restrict access:
+
+**Docker Compose example:**
+```yaml
+services:
+  petit:
+    image: petit:latest
+    networks:
+      - internal
+    # Don't expose ports externally
+    expose:
+      - "8565"
+
+  nginx:
+    image: nginx:latest
+    ports:
+      - "443:443"
+    networks:
+      - internal
+      - external
+    # nginx handles external access with auth
+
+networks:
+  internal:
+    internal: true
+  external:
+```
+
+### Security Checklist
+
+Before deploying to production:
+
+- [ ] API is bound to localhost or a private network interface
+- [ ] If exposed, authentication is enforced via reverse proxy
+- [ ] TLS/SSL is enabled for encrypted communication
+- [ ] Firewall rules restrict access to authorized IPs only
+- [ ] Access logs are monitored for suspicious activity
+- [ ] API port is not exposed to the public internet
+- [ ] Network segmentation isolates the scheduler from untrusted networks
+
+### Future Enhancements
+
+The following authentication features may be considered for future development:
+
+- API key authentication
+- JWT token support
+- Role-based access control (RBAC)
+- Audit logging for all API operations
+- Rate limiting per client
+
+For now, use the approaches above to secure your deployment.
+
 ## Example Usage
 
 ```bash
@@ -99,7 +222,7 @@ petit --db petit.db run examples/jobs --no-api
 # Custom port
 petit --db petit.db run examples/jobs --api-port 9000
 
-# Trigger job from another terminal
+# Trigger job from another terminal (local only)
 curl -X POST http://localhost:8565/api/jobs/hello_world/trigger
 
 # Check run status
