@@ -3,38 +3,16 @@
 //! Tests that verify the system can recover from interruptions
 //! and handle failed runs appropriately.
 
+mod common;
+
 use async_trait::async_trait;
+use common::wait_for_run_status;
 use petit::{
-    DagBuilder, InMemoryStorage, Job, JobId, RunId, RunStatus, Scheduler, Storage, StoredRun, Task,
+    DagBuilder, InMemoryStorage, Job, JobId, RunId, RunStatus, Scheduler, StoredRun, Task,
     TaskContext, TaskError,
 };
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Wait for a run to reach an expected status, polling storage.
-///
-/// This is more reliable than fixed sleeps since execution time can vary.
-async fn wait_for_run_status(
-    storage: &dyn Storage,
-    run_id: &RunId,
-    expected: RunStatus,
-    timeout: Duration,
-) -> StoredRun {
-    let start = tokio::time::Instant::now();
-    loop {
-        let run = storage.get_run(run_id).await.unwrap();
-        if run.status == expected {
-            return run;
-        }
-        if start.elapsed() > timeout {
-            panic!(
-                "Timeout waiting for run {} to reach {:?}, current status: {:?}",
-                run_id, expected, run.status
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
 
 /// Simple task that succeeds.
 struct SuccessTask {
