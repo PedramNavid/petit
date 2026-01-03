@@ -11,6 +11,31 @@ use petit::{
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Wait for a run to reach an expected status, polling storage.
+///
+/// This is more reliable than fixed sleeps since execution time can vary.
+async fn wait_for_run_status(
+    storage: &dyn Storage,
+    run_id: &RunId,
+    expected: RunStatus,
+    timeout: Duration,
+) -> StoredRun {
+    let start = tokio::time::Instant::now();
+    loop {
+        let run = storage.get_run(run_id).await.unwrap();
+        if run.status == expected {
+            return run;
+        }
+        if start.elapsed() > timeout {
+            panic!(
+                "Timeout waiting for run {} to reach {:?}, current status: {:?}",
+                run_id, expected, run.status
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Simple task that succeeds.
 struct SuccessTask {
     name: String,
@@ -109,8 +134,8 @@ async fn test_recovery_with_empty_storage() {
 /// Test: Job can be re-triggered after previous run failed.
 #[tokio::test]
 async fn test_retrigger_after_failure() {
-    let storage = InMemoryStorage::new();
-    let mut scheduler = Scheduler::new(storage);
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut scheduler = Scheduler::with_storage(Arc::clone(&storage));
 
     let dag = DagBuilder::new("dag", "Test DAG")
         .add_task(SuccessTask::new("task"))
@@ -122,13 +147,25 @@ async fn test_retrigger_after_failure() {
 
     let (handle, task) = scheduler.start().await;
 
-    // First trigger
+    // First trigger - wait for completion
     let run1 = handle.trigger("retrigger_job").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_run_status(
+        storage.as_ref(),
+        &run1,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Second trigger (should work even though first completed)
     let run2 = handle.trigger("retrigger_job").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_run_status(
+        storage.as_ref(),
+        &run2,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Both runs should have unique IDs
     assert_ne!(run1, run2);
@@ -170,8 +207,8 @@ async fn test_scheduler_state_transitions() {
 /// Test: Manual triggers work while scheduler is paused.
 #[tokio::test]
 async fn test_manual_trigger_while_paused() {
-    let storage = InMemoryStorage::new();
-    let mut scheduler = Scheduler::new(storage);
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut scheduler = Scheduler::with_storage(Arc::clone(&storage));
 
     let dag = DagBuilder::new("dag", "Test DAG")
         .add_task(SuccessTask::new("task"))
@@ -191,7 +228,14 @@ async fn test_manual_trigger_while_paused() {
     let run_id = handle.trigger("manual_job").await.unwrap();
     assert!(!run_id.as_uuid().is_nil());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for run to complete
+    wait_for_run_status(
+        storage.as_ref(),
+        &run_id,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     handle.shutdown().await.unwrap();
     let _ = task.await;
@@ -217,10 +261,15 @@ async fn test_run_status_transitions() {
     let run_id = handle.trigger("status_job").await.unwrap();
 
     // Wait for completion
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let run = wait_for_run_status(
+        storage.as_ref(),
+        &run_id,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Check final status
-    let run = storage.get_run(&run_id).await.unwrap();
     assert_eq!(run.status, RunStatus::Completed);
     assert!(run.ended_at.is_some());
     assert!(run.duration.is_some());
@@ -260,9 +309,16 @@ async fn test_failed_run_has_error() {
     let (handle, task) = scheduler.start().await;
 
     let run_id = handle.trigger("fail_job").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let run = storage.get_run(&run_id).await.unwrap();
+    // Wait for run to fail
+    let run = wait_for_run_status(
+        storage.as_ref(),
+        &run_id,
+        RunStatus::Failed,
+        Duration::from_secs(5),
+    )
+    .await;
+
     assert_eq!(run.status, RunStatus::Failed);
     assert!(run.error.is_some());
 
