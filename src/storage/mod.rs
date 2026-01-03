@@ -266,6 +266,9 @@ pub trait Storage: Send + Sync {
     /// Save a job definition.
     async fn save_job(&self, job: StoredJob) -> Result<(), StorageError>;
 
+    /// Upsert a job definition (insert or update).
+    async fn upsert_job(&self, job: StoredJob) -> Result<(), StorageError>;
+
     /// Get a job by ID.
     async fn get_job(&self, id: &JobId) -> Result<StoredJob, StorageError>;
 

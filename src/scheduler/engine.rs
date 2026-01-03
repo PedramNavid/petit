@@ -35,19 +35,25 @@ impl<S: Storage + 'static> EventHandler for TaskStateUpdater<S> {
             Event::TaskStarted { task_id, .. } => {
                 if let Ok(mut state) = self.storage.get_task_state(&self.run_id, task_id).await {
                     state.mark_running();
-                    let _ = self.storage.update_task_state(state).await;
+                    if let Err(e) = self.storage.update_task_state(state).await {
+                        tracing::warn!(task_id = %task_id, run_id = %self.run_id, error = %e, "Failed to update task state to running");
+                    }
                 }
             }
             Event::TaskCompleted { task_id, .. } => {
                 if let Ok(mut state) = self.storage.get_task_state(&self.run_id, task_id).await {
                     state.mark_completed();
-                    let _ = self.storage.update_task_state(state).await;
+                    if let Err(e) = self.storage.update_task_state(state).await {
+                        tracing::warn!(task_id = %task_id, run_id = %self.run_id, error = %e, "Failed to update task state to completed");
+                    }
                 }
             }
             Event::TaskFailed { task_id, error, .. } => {
                 if let Ok(mut state) = self.storage.get_task_state(&self.run_id, task_id).await {
                     state.mark_failed(error);
-                    let _ = self.storage.update_task_state(state).await;
+                    if let Err(e) = self.storage.update_task_state(state).await {
+                        tracing::warn!(task_id = %task_id, run_id = %self.run_id, error = %e, "Failed to update task state to failed");
+                    }
                 }
             }
             _ => {}
@@ -329,7 +335,15 @@ impl<S: Storage + 'static> Scheduler<S> {
     }
 
     /// Sync registered jobs to storage for visibility by TUI and other tools.
+    ///
+    /// This performs an upsert for all current jobs and removes any stale jobs
+    /// that exist in storage but are no longer registered with the scheduler.
     async fn sync_jobs_to_storage(&self) {
+        // Collect current job IDs
+        let current_job_ids: std::collections::HashSet<_> =
+            self.jobs.keys().cloned().collect();
+
+        // Upsert all current jobs
         for job in self.jobs.values() {
             let mut stored = StoredJob::new(job.id().clone(), job.name(), job.dag().id().clone())
                 .with_enabled(job.is_enabled());
@@ -338,11 +352,25 @@ impl<S: Storage + 'static> Scheduler<S> {
                 stored = stored.with_schedule(schedule.expression());
             }
 
-            // Try to save, ignore duplicate errors (job already exists)
-            if let Err(e) = self.storage.save_job(stored).await
-                && !matches!(e, StorageError::DuplicateKey(_))
-            {
+            if let Err(e) = self.storage.upsert_job(stored).await {
                 tracing::warn!(job_id = %job.id(), error = %e, "Failed to sync job to storage");
+            }
+        }
+
+        // Remove stale jobs from storage that are no longer registered
+        match self.storage.list_jobs().await {
+            Ok(stored_jobs) => {
+                for stored_job in stored_jobs {
+                    if !current_job_ids.contains(&stored_job.id) {
+                        tracing::info!(job_id = %stored_job.id, "Removing stale job from storage");
+                        if let Err(e) = self.storage.delete_job(&stored_job.id).await {
+                            tracing::warn!(job_id = %stored_job.id, error = %e, "Failed to delete stale job");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list jobs for stale cleanup");
             }
         }
     }
@@ -397,6 +425,10 @@ impl<S: Storage + 'static> Scheduler<S> {
                         SchedulerCommand::Resume { response } => {
                             let mut s = state.write().await;
                             *s = SchedulerState::Running;
+                            // Reset last_check to now to skip schedules that fired during pause.
+                            // This prevents a burst of missed runs from being triggered on resume.
+                            last_check = chrono::Utc::now();
+                            tracing::info!("Scheduler resumed, skipping any schedules that fired during pause");
                             let _ = response.send(());
                         }
                         SchedulerCommand::Shutdown { response } => {

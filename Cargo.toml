@@ -39,6 +39,8 @@ tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
 tokio-test = "0.4"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [features]
 default = ["api"]

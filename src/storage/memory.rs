@@ -50,6 +50,12 @@ impl Storage for InMemoryStorage {
         Ok(())
     }
 
+    async fn upsert_job(&self, job: StoredJob) -> Result<(), StorageError> {
+        let mut jobs = self.jobs.write().map_err(|_| StorageError::LockPoisoned)?;
+        jobs.insert(job.id.clone(), job);
+        Ok(())
+    }
+
     async fn get_job(&self, id: &JobId) -> Result<StoredJob, StorageError> {
         let jobs = self.jobs.read().map_err(|_| StorageError::LockPoisoned)?;
         jobs.get(id)

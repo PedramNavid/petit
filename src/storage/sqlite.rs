@@ -163,6 +163,32 @@ impl Storage for SqliteStorage {
         }
     }
 
+    async fn upsert_job(&self, job: StoredJob) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            INSERT INTO jobs (id, name, dag_id, schedule, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                dag_id = excluded.dag_id,
+                schedule = excluded.schedule,
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(job.id.as_str())
+        .bind(&job.name)
+        .bind(job.dag_id.as_str())
+        .bind(&job.schedule)
+        .bind(job.enabled)
+        .bind(system_time_to_string(job.created_at))
+        .bind(system_time_to_string(job.updated_at))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Other(e.to_string()))?;
+        Ok(())
+    }
+
     async fn get_job(&self, id: &JobId) -> Result<StoredJob, StorageError> {
         let row: (String, String, String, Option<String>, bool, String, String) = sqlx::query_as(
             "SELECT id, name, dag_id, schedule, enabled, created_at, updated_at FROM jobs WHERE id = ?",
