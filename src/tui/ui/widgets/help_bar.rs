@@ -21,6 +21,8 @@ pub fn render(frame: &mut Frame, area: Rect) {
         Span::raw("  "),
         key_hint("Enter", "Select"),
         Span::raw("  "),
+        key_hint("l", "Logs"),
+        Span::raw("  "),
         key_hint("Backspace", "Back"),
         Span::raw("  "),
         key_hint("r", "Refresh"),

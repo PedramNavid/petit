@@ -209,6 +209,12 @@ pub struct StoredTaskState {
     pub duration: Option<Duration>,
     /// Error message (if failed).
     pub error: Option<String>,
+    /// Standard output from the task execution.
+    pub stdout: Option<String>,
+    /// Standard error from the task execution.
+    pub stderr: Option<String>,
+    /// Exit code from the task execution.
+    pub exit_code: Option<i32>,
 }
 
 impl StoredTaskState {
@@ -223,7 +229,22 @@ impl StoredTaskState {
             ended_at: None,
             duration: None,
             error: None,
+            stdout: None,
+            stderr: None,
+            exit_code: None,
         }
+    }
+
+    /// Set the task output (stdout, stderr, exit_code).
+    pub fn set_output(
+        &mut self,
+        stdout: Option<String>,
+        stderr: Option<String>,
+        exit_code: Option<i32>,
+    ) {
+        self.stdout = stdout;
+        self.stderr = stderr;
+        self.exit_code = exit_code;
     }
 
     /// Mark the task as running.

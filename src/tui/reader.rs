@@ -225,8 +225,11 @@ impl TuiReader {
             Option<String>,
             Option<i64>,
             Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i32>,
         )> = sqlx::query_as(
-            "SELECT run_id, task_id, status, attempts, started_at, ended_at, duration_ms, error
+            "SELECT run_id, task_id, status, attempts, started_at, ended_at, duration_ms, error, stdout, stderr, exit_code
              FROM task_states WHERE run_id = ?
              ORDER BY started_at NULLS LAST, task_id",
         )
@@ -313,6 +316,9 @@ fn row_to_task_state(
         Option<String>,
         Option<i64>,
         Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i32>,
     ),
 ) -> StoredTaskState {
     StoredTaskState {
@@ -324,6 +330,9 @@ fn row_to_task_state(
         ended_at: row.5.as_ref().map(|s| string_to_system_time(s)),
         duration: row.6.map(|ms| Duration::from_millis(ms as u64)),
         error: row.7,
+        stdout: row.8,
+        stderr: row.9,
+        exit_code: row.10,
     }
 }
 

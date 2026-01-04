@@ -41,6 +41,7 @@ pub fn render(frame: &mut Frame, area: Rect) {
         )]),
         Line::from(""),
         key_line("Enter", "Drill down (Jobs -> Runs -> Tasks)"),
+        key_line("l", "View task logs (on Tasks tab)"),
         key_line("Backspace", "Go back"),
         key_line("r", "Force refresh"),
         Line::from(""),
