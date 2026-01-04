@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -13,11 +13,35 @@ use thiserror::Error;
 pub enum ConfigError {
     /// Failed to read configuration file.
     #[error("failed to read file: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(std::io::Error),
+
+    /// Failed to read a specific file with context.
+    #[error("failed to read file '{path}': {source}")]
+    FileReadError {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Failed to read a directory with context.
+    #[error("failed to read directory '{path}': {source}")]
+    DirReadError {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     /// Failed to parse YAML.
     #[error("YAML parse error: {0}")]
-    YamlError(#[from] serde_yaml::Error),
+    YamlError(serde_yaml::Error),
+
+    /// Failed to parse YAML from a specific file.
+    #[error("YAML parse error in '{path}': {source}")]
+    YamlFileError {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
 
     /// Invalid configuration value.
     #[error("invalid configuration: {0}")]
@@ -279,8 +303,24 @@ impl YamlLoader {
     /// # Ok::<(), petit::config::ConfigError>(())
     /// ```
     pub fn load_global_config(path: impl AsRef<Path>) -> Result<GlobalConfig, ConfigError> {
-        let content = std::fs::read_to_string(path)?;
-        Self::parse_global_config(&content)
+        let path = path.as_ref();
+        let content =
+            std::fs::read_to_string(path).map_err(|source| ConfigError::FileReadError {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Self::parse_global_config(&content).map_err(|e| match e {
+            ConfigError::YamlError(source) => ConfigError::YamlFileError {
+                path: path.to_path_buf(),
+                source,
+            },
+            ConfigError::InvalidConfig(msg) => ConfigError::InvalidConfig(format!(
+                "in global config file '{}': {}",
+                path.display(),
+                msg
+            )),
+            other => other,
+        })
     }
 
     /// Parse global configuration from a YAML string.
@@ -301,7 +341,7 @@ impl YamlLoader {
     /// # Ok::<(), petit::config::ConfigError>(())
     /// ```
     pub fn parse_global_config(yaml: &str) -> Result<GlobalConfig, ConfigError> {
-        let config: GlobalConfig = serde_yaml::from_str(yaml)?;
+        let config: GlobalConfig = serde_yaml::from_str(yaml).map_err(ConfigError::YamlError)?;
         Ok(config)
     }
 
@@ -318,8 +358,25 @@ impl YamlLoader {
     /// # Ok::<(), petit::config::ConfigError>(())
     /// ```
     pub fn load_job_config(path: impl AsRef<Path>) -> Result<JobConfig, ConfigError> {
-        let content = std::fs::read_to_string(path)?;
-        Self::parse_job_config(&content)
+        let path = path.as_ref();
+        let content =
+            std::fs::read_to_string(path).map_err(|source| ConfigError::FileReadError {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Self::parse_job_config(&content).map_err(|e| match e {
+            ConfigError::YamlError(source) => ConfigError::YamlFileError {
+                path: path.to_path_buf(),
+                source,
+            },
+            ConfigError::InvalidConfig(msg) => {
+                ConfigError::InvalidConfig(format!("in file '{}': {}", path.display(), msg))
+            }
+            ConfigError::MissingField(field) => {
+                ConfigError::MissingField(format!("{} (in file '{}')", field, path.display()))
+            }
+            other => other,
+        })
     }
 
     /// Parse a job configuration from a YAML string.
@@ -348,7 +405,7 @@ impl YamlLoader {
     /// # Ok::<(), petit::config::ConfigError>(())
     /// ```
     pub fn parse_job_config(yaml: &str) -> Result<JobConfig, ConfigError> {
-        let config: JobConfig = serde_yaml::from_str(yaml)?;
+        let config: JobConfig = serde_yaml::from_str(yaml).map_err(ConfigError::YamlError)?;
         Self::validate_job_config(&config)?;
         Ok(config)
     }
@@ -362,21 +419,26 @@ impl YamlLoader {
 
         // Check for empty name
         if config.name.is_empty() {
-            return Err(ConfigError::MissingField("name".into()));
+            return Err(ConfigError::MissingField(format!(
+                "name (job id: '{}')",
+                config.id
+            )));
         }
 
         // Check for at least one task
         if config.tasks.is_empty() {
-            return Err(ConfigError::InvalidConfig(
-                "job must have at least one task".into(),
-            ));
+            return Err(ConfigError::InvalidConfig(format!(
+                "Job '{}': must have at least one task",
+                config.name
+            )));
         }
 
         // Check that max_concurrency is not zero (would make jobs un-runnable)
         if config.max_concurrency == Some(0) {
-            return Err(ConfigError::InvalidConfig(
-                "max_concurrency cannot be zero".into(),
-            ));
+            return Err(ConfigError::InvalidConfig(format!(
+                "Job '{}': max_concurrency cannot be zero",
+                config.name
+            )));
         }
 
         // Check for duplicate task IDs
@@ -384,8 +446,8 @@ impl YamlLoader {
         for task in &config.tasks {
             if !task_ids.insert(&task.id) {
                 return Err(ConfigError::InvalidConfig(format!(
-                    "duplicate task id: {}",
-                    task.id
+                    "Job '{}': duplicate Task ID '{}'",
+                    config.name, task.id
                 )));
             }
         }
@@ -403,9 +465,10 @@ impl YamlLoader {
                 }
                 // Check dependency exists
                 if !task_ids.contains(dep.as_str()) {
+                    let available: Vec<&str> = task_ids.iter().copied().collect();
                     return Err(ConfigError::InvalidConfig(format!(
-                        "task '{}' depends on unknown task '{}'",
-                        task.id, dep
+                        "Job '{}': Task '{}' depends on unknown task '{}'. Available tasks: {:?}",
+                        config.name, task.id, dep, available
                     )));
                 }
                 // Check for duplicate dependencies
@@ -754,6 +817,18 @@ tasks: []
 "#;
         let result = YamlLoader::parse_job_config(yaml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(
+                msg.contains("No Tasks Job"),
+                "Error should include job name: {}",
+                msg
+            );
+            assert!(
+                msg.contains("must have at least one task"),
+                "Error should describe the issue: {}",
+                msg
+            );
+        }
     }
 
     #[test]
@@ -771,6 +846,23 @@ tasks:
 "#;
         let result = YamlLoader::parse_job_config(yaml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(
+                msg.contains("Duplicate Task Job"),
+                "Error should include job name: {}",
+                msg
+            );
+            assert!(
+                msg.contains("duplicate Task ID"),
+                "Error should describe duplicate task ID: {}",
+                msg
+            );
+            assert!(
+                msg.contains("task1"),
+                "Error should include task ID: {}",
+                msg
+            );
+        }
     }
 
     #[test]
@@ -786,6 +878,28 @@ tasks:
 "#;
         let result = YamlLoader::parse_job_config(yaml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(
+                msg.contains("Invalid Dependency Job"),
+                "Error should include job name: {}",
+                msg
+            );
+            assert!(
+                msg.contains("task1"),
+                "Error should include task name: {}",
+                msg
+            );
+            assert!(
+                msg.contains("nonexistent"),
+                "Error should include invalid dependency: {}",
+                msg
+            );
+            assert!(
+                msg.contains("Available tasks"),
+                "Error should list available tasks: {}",
+                msg
+            );
+        }
     }
 
     #[test]
@@ -802,7 +916,16 @@ tasks:
         let result = YamlLoader::parse_job_config(yaml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
-            assert!(msg.contains("max_concurrency cannot be zero"));
+            assert!(
+                msg.contains("Zero Concurrency Job"),
+                "Error should include job name: {}",
+                msg
+            );
+            assert!(
+                msg.contains("max_concurrency cannot be zero"),
+                "Error should describe the issue: {}",
+                msg
+            );
         }
     }
 
@@ -963,6 +1086,20 @@ tasks:
     }
 
     #[test]
+    fn test_file_read_error_includes_path() {
+        let nonexistent_path = "/nonexistent/path/to/job.yaml";
+        let result = YamlLoader::load_job_config(nonexistent_path);
+
+        match result {
+            Err(ConfigError::FileReadError { path, source }) => {
+                assert_eq!(path.to_str(), Some(nonexistent_path));
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            _ => panic!("Expected FileReadError with path context"),
+        }
+    }
+
+    #[test]
     fn test_validation_error_duplicate_dependency() {
         let yaml = r#"
 id: dup_dep_job
@@ -985,6 +1122,30 @@ tasks:
     }
 
     #[test]
+    fn test_yaml_file_error_includes_path() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_invalid_yaml.yaml");
+
+        // Write invalid YAML to a temporary file
+        let mut file = std::fs::File::create(&test_file).unwrap();
+        writeln!(file, "{{invalid yaml: [unclosed").unwrap();
+        drop(file);
+
+        let result = YamlLoader::load_job_config(&test_file);
+
+        // Clean up
+        let _ = std::fs::remove_file(&test_file);
+
+        match result {
+            Err(ConfigError::YamlFileError { path, source: _ }) => {
+                assert_eq!(path, test_file);
+            }
+            other => panic!("Expected YamlFileError, got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_validation_error_simple_cycle() {
         let yaml = r#"
 id: cycle_job
@@ -1003,6 +1164,20 @@ tasks:
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(msg.contains("cycle detected"));
+        }
+    }
+
+    #[test]
+    fn test_global_config_file_read_error_includes_path() {
+        let nonexistent_path = "/nonexistent/global/config.yaml";
+        let result = YamlLoader::load_global_config(nonexistent_path);
+
+        match result {
+            Err(ConfigError::FileReadError { path, source }) => {
+                assert_eq!(path.to_str(), Some(nonexistent_path));
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            _ => panic!("Expected FileReadError with path context"),
         }
     }
 
@@ -1100,5 +1275,49 @@ tasks:
 "#;
         let result = YamlLoader::parse_job_config(yaml);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_missing_field_error_includes_file_context() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_missing_field.yaml");
+
+        // Write job config with empty name
+        let mut file = std::fs::File::create(&test_file).unwrap();
+        writeln!(
+            file,
+            r#"
+id: test_job
+name: ""
+tasks:
+  - id: task1
+    type: command
+    command: echo
+"#
+        )
+        .unwrap();
+        drop(file);
+
+        let result = YamlLoader::load_job_config(&test_file);
+
+        // Clean up
+        let _ = std::fs::remove_file(&test_file);
+
+        match result {
+            Err(ConfigError::MissingField(msg)) => {
+                assert!(
+                    msg.contains("in file"),
+                    "Error should include file context: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains(&test_file.display().to_string()),
+                    "Error should include file path: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected MissingField error, got: {:?}", other),
+        }
     }
 }

@@ -556,7 +556,8 @@ mod tests {
             .with_dependency(JobDependency::new(job_id.clone()));
 
         // Even if the job is in known_jobs, self-dependency should be rejected
-        let result = job.validate(&[job_id]);
+        let known_jobs: HashSet<JobId> = [job_id].into_iter().collect();
+        let result = job.validate(&known_jobs);
         assert!(matches!(result, Err(JobError::InvalidDependency(_))));
 
         if let Err(JobError::InvalidDependency(msg)) = result {

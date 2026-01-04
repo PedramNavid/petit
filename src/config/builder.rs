@@ -59,7 +59,7 @@ impl JobConfigBuilder {
         let mut dag_builder = DagBuilder::new(&config.id, &config.name);
 
         for task_config in &config.tasks {
-            let task = Self::build_task(task_config)?;
+            let task = Self::build_task(&config.name, task_config)?;
             let condition = task_config
                 .condition
                 .as_ref()
@@ -72,7 +72,7 @@ impl JobConfigBuilder {
 
         let dag = dag_builder
             .build()
-            .map_err(|e| ConfigError::InvalidConfig(e.to_string()))?;
+            .map_err(|e| ConfigError::InvalidConfig(format!("Job '{}': {}", config.name, e)))?;
 
         // Create the job
         let mut job = Job::new(config.id.clone(), &config.name, dag);
@@ -80,8 +80,12 @@ impl JobConfigBuilder {
         // Add schedule if present
         if let Some(schedule_config) = &config.schedule {
             let cron_expr = schedule_config.cron();
-            let schedule = Schedule::new(cron_expr)
-                .map_err(|e| ConfigError::InvalidConfig(format!("invalid schedule: {}", e)))?;
+            let schedule = Schedule::new(cron_expr).map_err(|e| {
+                ConfigError::InvalidConfig(format!(
+                    "Job '{}': invalid schedule '{}': {}",
+                    config.name, cron_expr, e
+                ))
+            })?;
             job = job.with_schedule(schedule);
         }
 
@@ -89,8 +93,12 @@ impl JobConfigBuilder {
         let mut job_config_map = std::collections::HashMap::new();
         for (key, value) in &config.config {
             // Convert serde_yaml::Value to serde_json::Value
-            let json_value = serde_json::to_value(value)
-                .map_err(|e| ConfigError::InvalidConfig(e.to_string()))?;
+            let json_value = serde_json::to_value(value).map_err(|e| {
+                ConfigError::InvalidConfig(format!(
+                    "Job '{}': failed to convert config key '{}': {}",
+                    config.name, key, e
+                ))
+            })?;
             job_config_map.insert(key.clone(), json_value);
         }
         if !job_config_map.is_empty() {
@@ -110,6 +118,7 @@ impl JobConfigBuilder {
 
     /// Build a Task from TaskConfig.
     fn build_task(
+        job_name: &str,
         config: &super::yaml::TaskConfig,
     ) -> Result<Arc<dyn crate::core::task::Task>, ConfigError> {
         match &config.task_type {
@@ -177,8 +186,8 @@ impl JobConfigBuilder {
                 Ok(Arc::new(builder.build()))
             }
             TaskTypeConfig::Custom { handler, .. } => Err(ConfigError::InvalidConfig(format!(
-                "custom task type '{}' is not supported yet",
-                handler
+                "Job '{}': Task '{}': custom task type '{}' is not supported yet",
+                job_name, config.id, handler
             ))),
         }
     }
@@ -232,15 +241,16 @@ pub fn load_jobs_from_directory(dir: impl AsRef<Path>) -> Result<Vec<Job>, Confi
     let dir = dir.as_ref();
     let mut jobs = Vec::new();
 
-    if !dir.is_dir() {
-        return Err(ConfigError::InvalidConfig(format!(
-            "'{}' is not a directory",
-            dir.display()
-        )));
-    }
+    let entries = std::fs::read_dir(dir).map_err(|source| ConfigError::DirReadError {
+        path: dir.to_path_buf(),
+        source,
+    })?;
 
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+    for entry in entries {
+        let entry = entry.map_err(|source| ConfigError::DirReadError {
+            path: dir.to_path_buf(),
+            source,
+        })?;
         let path = entry.path();
 
         // Only process .yaml and .yml files
@@ -436,5 +446,19 @@ tasks:
         let job = JobConfigBuilder::build(config).unwrap();
 
         assert!(!job.is_enabled());
+    }
+
+    #[test]
+    fn test_dir_read_error_includes_path() {
+        let nonexistent_dir = "/nonexistent/jobs/directory";
+        let result = super::load_jobs_from_directory(nonexistent_dir);
+
+        match result {
+            Err(ConfigError::DirReadError { path, source }) => {
+                assert_eq!(path.to_str(), Some(nonexistent_dir));
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            _ => panic!("Expected DirReadError with path context"),
+        }
     }
 }
