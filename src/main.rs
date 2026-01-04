@@ -5,7 +5,10 @@
 //!   pt validate <jobs-dir> Validate job configurations without running
 //!   pt list <jobs-dir>    List all jobs in the directory
 
+mod cli_config;
+
 use clap::{Parser, Subcommand};
+use cli_config::Config;
 use petit::{
     DagExecutor, EventBus, EventHandler, InMemoryStorage, Scheduler, Storage,
     load_jobs_from_directory,
@@ -26,6 +29,10 @@ use tracing::{error, info, warn};
 #[command(name = "pt")]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    /// Path to configuration file (overrides XDG default)
+    #[arg(short, long, global = true)]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -38,19 +45,19 @@ enum Commands {
         #[arg(value_name = "JOBS_DIR")]
         jobs_dir: PathBuf,
 
-        /// Maximum concurrent jobs (default: unlimited)
+        /// Maximum concurrent jobs (overrides config file)
         #[arg(short = 'j', long)]
         max_jobs: Option<usize>,
 
-        /// Maximum concurrent tasks per job (default: 4)
-        #[arg(short = 't', long, default_value = "4")]
-        max_tasks: usize,
+        /// Maximum concurrent tasks per job (overrides config file, default: 4)
+        #[arg(short = 't', long)]
+        max_tasks: Option<usize>,
 
-        /// Scheduler tick interval in seconds (default: 1)
-        #[arg(long, default_value = "1")]
-        tick_interval: u64,
+        /// Scheduler tick interval in seconds (overrides config file, default: 1)
+        #[arg(long)]
+        tick_interval: Option<u64>,
 
-        /// Path to SQLite database file for persistent storage (requires sqlite feature)
+        /// Path to SQLite database file for persistent storage (overrides config file)
         #[cfg(feature = "sqlite")]
         #[arg(long, env = "PETIT_DB")]
         db: Option<PathBuf>,
@@ -60,15 +67,15 @@ enum Commands {
         #[arg(long)]
         no_api: bool,
 
-        /// API server port (default: 8565)
+        /// API server port (overrides config file, default: 8565)
         #[cfg(feature = "api")]
-        #[arg(long, default_value = "8565")]
-        api_port: u16,
+        #[arg(long)]
+        api_port: Option<u16>,
 
-        /// API server host (default: 127.0.0.1)
+        /// API server host (overrides config file, default: 127.0.0.1)
         #[cfg(feature = "api")]
-        #[arg(long, default_value = "127.0.0.1")]
-        api_host: String,
+        #[arg(long)]
+        api_host: Option<String>,
     },
 
     /// Validate job configurations without running
@@ -100,6 +107,64 @@ enum Commands {
         #[arg(long, env = "PETIT_DB")]
         db: Option<PathBuf>,
     },
+}
+
+/// Merge CLI arguments with file configuration (with API support).
+/// CLI arguments take priority over file configuration.
+#[cfg(feature = "api")]
+#[allow(clippy::too_many_arguments)]
+fn merge_config(
+    file_config: &Config,
+    cli_max_jobs: Option<usize>,
+    cli_max_tasks: Option<usize>,
+    cli_tick_interval: Option<u64>,
+    cli_db: Option<PathBuf>,
+    cli_no_api: bool,
+    cli_api_port: Option<u16>,
+    cli_api_host: Option<String>,
+) -> (
+    Option<usize>,     // max_jobs
+    usize,             // max_tasks
+    u64,               // tick_interval
+    Option<PathBuf>,   // db_path
+    Option<ApiConfig>, // api_config
+) {
+    // Merge max_jobs: CLI > config file > default (None)
+    let max_jobs = cli_max_jobs.or(file_config.scheduler.max_jobs);
+
+    // Merge max_tasks: CLI > config file > default
+    let max_tasks = cli_max_tasks.unwrap_or(file_config.scheduler.max_tasks);
+
+    // Merge tick_interval: CLI > config file > default
+    let tick_interval = cli_tick_interval.unwrap_or(file_config.scheduler.tick_interval);
+
+    // Merge storage configuration
+    let db_path = cli_db.or_else(|| {
+        #[cfg(feature = "sqlite")]
+        if let cli_config::StorageConfig::Sqlite { path } = &file_config.storage {
+            return Some(path.clone());
+        }
+        None
+    });
+
+    // Merge API configuration
+    // API is enabled if: not explicitly disabled via --no-api AND
+    // (api.enabled in config OR any CLI API flag is set)
+    let api_config = if cli_no_api {
+        None
+    } else {
+        let cli_api_flags_set = cli_api_host.is_some() || cli_api_port.is_some();
+        let api_enabled = file_config.api.enabled || cli_api_flags_set;
+        if api_enabled {
+            let host = cli_api_host.unwrap_or_else(|| file_config.api.host.clone());
+            let port = cli_api_port.unwrap_or(file_config.api.port);
+            Some(ApiConfig::new(host, port))
+        } else {
+            None
+        }
+    };
+
+    (max_jobs, max_tasks, tick_interval, db_path, api_config)
 }
 
 /// Simple logging event handler that prints job events.
@@ -208,6 +273,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
+    // Load configuration from file (explicit or XDG default)
+    let file_config = match Config::load(cli.config.clone()) {
+        Ok(config) => {
+            if cli.config.is_some() {
+                info!(
+                    "Loaded configuration from: {}",
+                    cli.config.as_ref().unwrap().display()
+                );
+            } else if let Some(default_path) = Config::default_config_path()
+                && default_path.exists()
+            {
+                info!("Loaded configuration from: {}", default_path.display());
+            }
+            config
+        }
+        Err(e) => {
+            error!("Failed to load configuration: {}", e);
+            return Err(e.into());
+        }
+    };
+
     match cli.command {
         #[cfg(all(feature = "sqlite", feature = "api"))]
         Commands::Run {
@@ -220,12 +306,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             api_port,
             api_host,
         } => {
-            let api_config = if no_api {
-                None
-            } else {
-                Some(ApiConfig::new(api_host, api_port))
-            };
-            run_scheduler(jobs_dir, max_jobs, max_tasks, tick_interval, db, api_config).await?;
+            let (
+                merged_max_jobs,
+                merged_max_tasks,
+                merged_tick_interval,
+                merged_db,
+                merged_api_config,
+            ) = merge_config(
+                &file_config,
+                max_jobs,
+                max_tasks,
+                tick_interval,
+                db,
+                no_api,
+                api_port,
+                api_host,
+            );
+            run_scheduler(
+                jobs_dir,
+                merged_max_jobs,
+                merged_max_tasks,
+                merged_tick_interval,
+                merged_db,
+                merged_api_config,
+            )
+            .await?;
         }
         #[cfg(all(feature = "sqlite", not(feature = "api")))]
         Commands::Run {
@@ -235,7 +340,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tick_interval,
             db,
         } => {
-            run_scheduler(jobs_dir, max_jobs, max_tasks, tick_interval, db, ()).await?;
+            let (merged_max_jobs, merged_max_tasks, merged_tick_interval, merged_db) = {
+                let config_max_jobs = max_jobs.or(file_config.scheduler.max_jobs);
+                let config_max_tasks = max_tasks.unwrap_or(file_config.scheduler.max_tasks);
+                let config_tick_interval =
+                    tick_interval.unwrap_or(file_config.scheduler.tick_interval);
+                let config_db = db.or_else(|| {
+                    if let cli_config::StorageConfig::Sqlite { path } = &file_config.storage {
+                        Some(path.clone())
+                    } else {
+                        None
+                    }
+                });
+                (
+                    config_max_jobs,
+                    config_max_tasks,
+                    config_tick_interval,
+                    config_db,
+                )
+            };
+            run_scheduler(
+                jobs_dir,
+                merged_max_jobs,
+                merged_max_tasks,
+                merged_tick_interval,
+                merged_db,
+                (),
+            )
+            .await?;
         }
         #[cfg(all(not(feature = "sqlite"), feature = "api"))]
         Commands::Run {
@@ -247,18 +379,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             api_port,
             api_host,
         } => {
-            let api_config = if no_api {
-                None
-            } else {
-                Some(ApiConfig::new(api_host, api_port))
-            };
+            let (merged_max_jobs, merged_max_tasks, merged_tick_interval, _, merged_api_config) =
+                merge_config(
+                    &file_config,
+                    max_jobs,
+                    max_tasks,
+                    tick_interval,
+                    None,
+                    no_api,
+                    api_port,
+                    api_host,
+                );
             run_scheduler(
                 jobs_dir,
-                max_jobs,
-                max_tasks,
-                tick_interval,
+                merged_max_jobs,
+                merged_max_tasks,
+                merged_tick_interval,
                 None::<PathBuf>,
-                api_config,
+                merged_api_config,
             )
             .await?;
         }
@@ -269,11 +407,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_tasks,
             tick_interval,
         } => {
+            let (merged_max_jobs, merged_max_tasks, merged_tick_interval, _) = {
+                let config_max_jobs = max_jobs.or(file_config.scheduler.max_jobs);
+                let config_max_tasks = max_tasks.unwrap_or(file_config.scheduler.max_tasks);
+                let config_tick_interval =
+                    tick_interval.unwrap_or(file_config.scheduler.tick_interval);
+                (
+                    config_max_jobs,
+                    config_max_tasks,
+                    config_tick_interval,
+                    None::<PathBuf>,
+                )
+            };
             run_scheduler(
                 jobs_dir,
-                max_jobs,
-                max_tasks,
-                tick_interval,
+                merged_max_jobs,
+                merged_max_tasks,
+                merged_tick_interval,
                 None::<PathBuf>,
                 (),
             )
@@ -291,7 +441,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             job_id,
             db,
         } => {
-            trigger_job(jobs_dir, job_id, db).await?;
+            // Merge CLI db with config file storage setting
+            let merged_db = db.or_else(|| {
+                if let cli_config::StorageConfig::Sqlite { path } = &file_config.storage {
+                    Some(path.clone())
+                } else {
+                    None
+                }
+            });
+            trigger_job(jobs_dir, job_id, merged_db).await?;
         }
         #[cfg(not(feature = "sqlite"))]
         Commands::Trigger { jobs_dir, job_id } => {
