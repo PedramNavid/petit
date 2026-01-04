@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -19,6 +19,10 @@ pub enum JobError {
     /// Invalid DAG configuration.
     #[error("invalid DAG: {0}")]
     InvalidDag(String),
+
+    /// Invalid dependency.
+    #[error("invalid dependency: {0}")]
+    InvalidDependency(String),
 
     /// Missing dependency.
     #[error("missing job dependency: {0}")]
@@ -160,7 +164,12 @@ impl Job {
     }
 
     /// Set the maximum concurrent runs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max` is zero. Use `JobBuilder` if you need error handling.
     pub fn with_max_concurrency(mut self, max: usize) -> Self {
+        assert!(max > 0, "max_concurrency cannot be zero");
         self.max_concurrency = Some(max);
         self
     }
@@ -227,15 +236,24 @@ impl Job {
     ///
     /// Checks that:
     /// - The DAG is valid
+    /// - No self-dependencies exist
     /// - All dependency job IDs are provided in known_jobs
-    pub fn validate(&self, known_jobs: &[JobId]) -> Result<(), JobError> {
+    pub fn validate(&self, known_jobs: &HashSet<JobId>) -> Result<(), JobError> {
         // Validate DAG
         self.dag
             .validate()
             .map_err(|e| JobError::InvalidDag(e.to_string()))?;
 
-        // Validate dependencies exist
+        // Validate dependencies
         for dep in &self.dependencies {
+            // Check for self-dependency
+            if dep.job_id == self.id {
+                return Err(JobError::InvalidDependency(
+                    "job cannot depend on itself".to_string(),
+                ));
+            }
+
+            // Check dependency exists
             if !known_jobs.contains(&dep.job_id) {
                 return Err(JobError::MissingDependency(dep.job_id.to_string()));
             }
@@ -308,7 +326,12 @@ impl JobBuilder {
     }
 
     /// Set maximum concurrent runs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max` is zero.
     pub fn max_concurrency(mut self, max: usize) -> Self {
+        assert!(max > 0, "max_concurrency cannot be zero");
         self.max_concurrency = Some(max);
         self
     }
@@ -324,6 +347,13 @@ impl JobBuilder {
         let dag = self
             .dag
             .ok_or(JobError::InvalidDag("DAG is required".into()))?;
+
+        // Validate max_concurrency is not zero
+        if self.max_concurrency == Some(0) {
+            return Err(JobError::InvalidConfig(
+                "max_concurrency cannot be zero".into(),
+            ));
+        }
 
         Ok(Job {
             id: self.id,
@@ -488,7 +518,8 @@ mod tests {
         let dag = create_etl_dag();
         let job = Job::new("valid_job", "Valid Job", dag);
 
-        let result = job.validate(&[]);
+        let known_jobs = HashSet::new();
+        let result = job.validate(&known_jobs);
         assert!(result.is_ok());
     }
 
@@ -498,7 +529,9 @@ mod tests {
         let job = Job::new("dep_job", "Dependent Job", dag)
             .with_dependency(JobDependency::new(JobId::new("nonexistent")));
 
-        let result = job.validate(&[JobId::new("other_job")]);
+        let mut known_jobs = HashSet::new();
+        known_jobs.insert(JobId::new("other_job"));
+        let result = job.validate(&known_jobs);
         assert!(matches!(result, Err(JobError::MissingDependency(_))));
     }
 
@@ -508,8 +541,28 @@ mod tests {
         let job = Job::new("dep_job", "Dependent Job", dag)
             .with_dependency(JobDependency::new(JobId::new("upstream")));
 
-        let result = job.validate(&[JobId::new("upstream"), JobId::new("other")]);
+        let mut known_jobs = HashSet::new();
+        known_jobs.insert(JobId::new("upstream"));
+        known_jobs.insert(JobId::new("other"));
+        let result = job.validate(&known_jobs);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_job_rejects_self_dependency() {
+        let dag = create_simple_dag();
+        let job_id = JobId::new("self_dep_job");
+        let job = Job::new(job_id.clone(), "Self Dependent Job", dag)
+            .with_dependency(JobDependency::new(job_id.clone()));
+
+        // Even if the job is in known_jobs, self-dependency should be rejected
+        let known_jobs: HashSet<JobId> = [job_id].into_iter().collect();
+        let result = job.validate(&known_jobs);
+        assert!(matches!(result, Err(JobError::InvalidDependency(_))));
+
+        if let Err(JobError::InvalidDependency(msg)) = result {
+            assert!(msg.contains("cannot depend on itself"));
+        }
     }
 
     #[test]
@@ -617,5 +670,49 @@ mod tests {
         assert!(debug_str.contains("test_dag")); // dag_id
         assert!(debug_str.contains("upstream")); // dependency
         assert!(debug_str.contains("max_concurrency: Some(2)"));
+    }
+
+    #[test]
+    #[should_panic(expected = "max_concurrency cannot be zero")]
+    fn test_job_with_max_concurrency_rejects_zero() {
+        let dag = create_simple_dag();
+        let _job =
+            Job::new("zero_concurrency", "Zero Concurrency Job", dag).with_max_concurrency(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_concurrency cannot be zero")]
+    fn test_job_builder_max_concurrency_rejects_zero() {
+        let dag = create_simple_dag();
+        let _job = JobBuilder::new("zero_concurrency", "Zero Concurrency Job")
+            .dag(dag)
+            .max_concurrency(0)
+            .build()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_job_builder_validates_zero_concurrency_in_build() {
+        let dag = create_simple_dag();
+        // Directly set max_concurrency to 0 (bypassing the setter)
+        let mut builder = JobBuilder::new("zero_concurrency", "Zero Concurrency Job");
+        builder.dag = Some(dag);
+        builder.max_concurrency = Some(0);
+
+        let result = builder.build();
+        assert!(matches!(result, Err(JobError::InvalidConfig(_))));
+        if let Err(JobError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("max_concurrency cannot be zero"));
+        }
+    }
+
+    #[test]
+    fn test_job_with_max_concurrency_accepts_positive_values() {
+        let dag = create_simple_dag();
+        let job1 = Job::new("job1", "Job 1", dag.clone()).with_max_concurrency(1);
+        assert_eq!(job1.max_concurrency(), Some(1));
+
+        let job2 = Job::new("job2", "Job 2", dag).with_max_concurrency(100);
+        assert_eq!(job2.max_concurrency(), Some(100));
     }
 }

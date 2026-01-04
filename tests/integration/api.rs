@@ -2,21 +2,25 @@
 //!
 //! These tests verify the HTTP API server starts and responds correctly.
 
+use crate::common::wait_for_run_status;
 use petit::api::{build_router, create_api_state};
 use petit::core::dag::Dag;
 use petit::core::job::Job;
 use petit::scheduler::Scheduler;
 use petit::storage::InMemoryStorage;
+use petit::{RunId, RunStatus};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 use tower::ServiceExt;
 
 /// Create a test API state with a simple job.
-async fn create_test_state() -> petit::api::ApiState<InMemoryStorage> {
+/// Returns both the API state and the storage for testing purposes.
+async fn create_test_state() -> (petit::api::ApiState<InMemoryStorage>, Arc<InMemoryStorage>) {
     let storage = Arc::new(InMemoryStorage::new());
     let mut scheduler = Scheduler::with_storage(Arc::clone(&storage));
 
@@ -27,13 +31,14 @@ async fn create_test_state() -> petit::api::ApiState<InMemoryStorage> {
 
     let (handle, _task) = scheduler.start().await;
 
-    create_api_state(handle, storage, vec![job])
+    let state = create_api_state(handle, Arc::clone(&storage), vec![job]);
+    (state, storage)
 }
 
 /// Test: Health endpoint responds with status ok.
 #[tokio::test]
 async fn test_health_endpoint() {
-    let state = create_test_state().await;
+    let (state, _storage) = create_test_state().await;
     let router = build_router(state);
 
     let request = Request::builder()
@@ -55,7 +60,7 @@ async fn test_health_endpoint() {
 /// Test: Scheduler state endpoint returns running state.
 #[tokio::test]
 async fn test_scheduler_state_endpoint() {
-    let state = create_test_state().await;
+    let (state, _storage) = create_test_state().await;
     let router = build_router(state);
 
     let request = Request::builder()
@@ -78,7 +83,7 @@ async fn test_scheduler_state_endpoint() {
 /// Test: List jobs endpoint returns registered jobs.
 #[tokio::test]
 async fn test_list_jobs_endpoint() {
-    let state = create_test_state().await;
+    let (state, _storage) = create_test_state().await;
     let router = build_router(state);
 
     let request = Request::builder()
@@ -102,7 +107,7 @@ async fn test_list_jobs_endpoint() {
 /// Test: Get specific job by ID.
 #[tokio::test]
 async fn test_get_job_endpoint() {
-    let state = create_test_state().await;
+    let (state, _storage) = create_test_state().await;
     let router = build_router(state);
 
     let request = Request::builder()
@@ -124,7 +129,7 @@ async fn test_get_job_endpoint() {
 /// Test: Get non-existent job returns 404.
 #[tokio::test]
 async fn test_get_nonexistent_job_returns_404() {
-    let state = create_test_state().await;
+    let (state, _storage) = create_test_state().await;
     let router = build_router(state);
 
     let request = Request::builder()
@@ -140,7 +145,7 @@ async fn test_get_nonexistent_job_returns_404() {
 /// Test: Pause and resume scheduler via API.
 #[tokio::test]
 async fn test_pause_resume_scheduler() {
-    let state = create_test_state().await;
+    let (state, _storage) = create_test_state().await;
     let router = build_router(state);
 
     // Pause the scheduler
@@ -189,7 +194,7 @@ async fn test_pause_resume_scheduler() {
 /// Test: Trigger job creates a run.
 #[tokio::test]
 async fn test_trigger_job_endpoint() {
-    let state = create_test_state().await;
+    let (state, _storage) = create_test_state().await;
     let router = build_router(state);
 
     let request = Request::builder()
@@ -213,7 +218,7 @@ async fn test_trigger_job_endpoint() {
 /// Test: List runs for a job.
 #[tokio::test]
 async fn test_list_runs_endpoint() {
-    let state = create_test_state().await;
+    let (state, storage) = create_test_state().await;
     let router = build_router(state);
 
     // First trigger a job to create a run
@@ -223,10 +228,21 @@ async fn test_list_runs_endpoint() {
         .body(Body::empty())
         .unwrap();
 
-    let _ = router.clone().oneshot(request).await.unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let run_id_str = json["run_id"].as_str().unwrap();
+    let run_id = RunId::from_string(run_id_str).unwrap();
 
-    // Small delay to let the run be recorded
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // Wait for the run to be recorded with a status (any status is fine)
+    // We just need to ensure it's been persisted to storage
+    wait_for_run_status(
+        storage.as_ref(),
+        &run_id,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Now list runs
     let request = Request::builder()
@@ -249,7 +265,7 @@ async fn test_list_runs_endpoint() {
 /// Test: Invalid run ID returns appropriate error.
 #[tokio::test]
 async fn test_invalid_run_id_returns_error() {
-    let state = create_test_state().await;
+    let (state, _storage) = create_test_state().await;
     let router = build_router(state);
 
     let request = Request::builder()

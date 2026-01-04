@@ -28,19 +28,30 @@ No! I built this to see what it would take to build an orchestrator with Claude 
 - **Conditional execution** — Run tasks based on upstream success/failure
 - **Cross-job dependencies** — Jobs can depend on other jobs
 - **Event system** — Subscribe to lifecycle events (task started, completed, failed, etc.)
+- **HTTP REST API** — Optional API server for monitoring and control (enabled by default)
 - **Pluggable storage** — In-memory (default) or SQLite for persistence
 - **Concurrency control** — Limit parallel tasks and concurrent job runs
+
+### Feature Flags
+
+- `api` — Enables HTTP REST API and related CLI flags (`--no-api`, `--api-port`, `--api-host`). **Enabled by default.**
+- `sqlite` — Enables SQLite storage backend and `--db` CLI flag
+- `tui` — Enables terminal UI dashboard (includes sqlite)
 
 ## Installation
 
 ```bash
+# Default installation (includes API feature)
 cargo install --path .
 
 # With SQLite support
 cargo install --path . --features sqlite
 
 # With TUI support
-cargo install --path . --features tui,sqlite
+cargo install --path . --features tui
+
+# Minimal installation (no API, no SQLite)
+cargo install --path . --no-default-features
 ```
 
 ## Quick Start
@@ -92,11 +103,17 @@ pt trigger <jobs-dir> <job-id>  # Trigger a job manually
 
 ### Options for `run`
 
-| Flag                  | Description                                     |
-| --------------------- | ----------------------------------------------- |
-| `-j, --max-jobs <N>`  | Maximum concurrent jobs (default: unlimited)    |
-| `-t, --max-tasks <N>` | Maximum concurrent tasks per job (default: 4)   |
-| `--tick-interval <N>` | Scheduler tick interval in seconds (default: 1) |
+| Flag                  | Description                                                           |
+| --------------------- | --------------------------------------------------------------------- |
+| `-j, --max-jobs <N>`  | Maximum concurrent jobs (default: unlimited)                          |
+| `-t, --max-tasks <N>` | Maximum concurrent tasks per job (default: 4)                         |
+| `--tick-interval <N>` | Scheduler tick interval in seconds (default: 1)                       |
+| `--db <PATH>`         | Path to SQLite database file (requires `sqlite` feature)              |
+| `--no-api`            | Disable HTTP API server (requires `api` feature, enabled by default)  |
+| `--api-port <PORT>`   | API server port (default: 8565, requires `api` feature)               |
+| `--api-host <HOST>`   | API server host (default: 127.0.0.1, requires `api` feature)          |
+
+**Note:** API-related flags (`--no-api`, `--api-port`, `--api-host`) are only available when the `api` feature is enabled (which is the default). If you compile with `--no-default-features`, these flags will not be available and no API server will start.
 
 ## Job Configuration
 
