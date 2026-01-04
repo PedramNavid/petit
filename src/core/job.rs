@@ -20,6 +20,10 @@ pub enum JobError {
     #[error("invalid DAG: {0}")]
     InvalidDag(String),
 
+    /// Invalid dependency.
+    #[error("invalid dependency: {0}")]
+    InvalidDependency(String),
+
     /// Missing dependency.
     #[error("missing job dependency: {0}")]
     MissingDependency(String),
@@ -232,6 +236,7 @@ impl Job {
     ///
     /// Checks that:
     /// - The DAG is valid
+    /// - No self-dependencies exist
     /// - All dependency job IDs are provided in known_jobs
     pub fn validate(&self, known_jobs: &HashSet<JobId>) -> Result<(), JobError> {
         // Validate DAG
@@ -239,8 +244,16 @@ impl Job {
             .validate()
             .map_err(|e| JobError::InvalidDag(e.to_string()))?;
 
-        // Validate dependencies exist
+        // Validate dependencies
         for dep in &self.dependencies {
+            // Check for self-dependency
+            if dep.job_id == self.id {
+                return Err(JobError::InvalidDependency(
+                    "job cannot depend on itself".to_string(),
+                ));
+            }
+
+            // Check dependency exists
             if !known_jobs.contains(&dep.job_id) {
                 return Err(JobError::MissingDependency(dep.job_id.to_string()));
             }
@@ -533,6 +546,22 @@ mod tests {
         known_jobs.insert(JobId::new("other"));
         let result = job.validate(&known_jobs);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_job_rejects_self_dependency() {
+        let dag = create_simple_dag();
+        let job_id = JobId::new("self_dep_job");
+        let job = Job::new(job_id.clone(), "Self Dependent Job", dag)
+            .with_dependency(JobDependency::new(job_id.clone()));
+
+        // Even if the job is in known_jobs, self-dependency should be rejected
+        let result = job.validate(&[job_id]);
+        assert!(matches!(result, Err(JobError::InvalidDependency(_))));
+
+        if let Err(JobError::InvalidDependency(msg)) = result {
+            assert!(msg.contains("cannot depend on itself"));
+        }
     }
 
     #[test]
