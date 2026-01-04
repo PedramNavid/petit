@@ -8,8 +8,8 @@ use petit::{
     DagBuilder, Event, EventBus, EventHandler, InMemoryStorage, Job, RunStatus, Scheduler, Storage,
     Task, TaskContext, TaskError,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -35,9 +35,11 @@ impl RecordingHandler {
     }
 
     async fn has_successful_completion(&self) -> bool {
-        self.events.lock().await.iter().any(|e| {
-            matches!(e, Event::JobCompleted { success, .. } if *success)
-        })
+        self.events
+            .lock()
+            .await
+            .iter()
+            .any(|e| matches!(e, Event::JobCompleted { success, .. } if *success))
     }
 }
 
