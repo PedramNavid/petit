@@ -81,8 +81,12 @@ impl JobConfigBuilder {
         if let Some(schedule_config) = &config.schedule {
             let cron_expr = schedule_config.cron();
             let tz = schedule_config.timezone().unwrap_or("UTC");
-            let schedule = Schedule::with_timezone(cron_expr, tz)
-                .map_err(|e| ConfigError::InvalidConfig(format!("Job '{}': invalid schedule: {} {}", config.name, cron_espr, e)))?;
+            let schedule = Schedule::with_timezone(cron_expr, tz).map_err(|e| {
+                ConfigError::InvalidConfig(format!(
+                    "Job '{}': invalid schedule: {} {}",
+                    config.name, cron_expr, e
+                ))
+            })?;
             job = job.with_schedule(schedule);
         }
 
