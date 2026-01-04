@@ -18,10 +18,42 @@ use super::yaml::{
 };
 
 /// Builder for creating Jobs from YAML configuration.
+///
+/// Converts parsed YAML job configurations into runnable [`Job`] instances
+/// with fully constructed DAGs, task executors, and scheduling information.
 pub struct JobConfigBuilder;
 
 impl JobConfigBuilder {
     /// Build a Job from a JobConfig.
+    ///
+    /// This method converts a parsed YAML configuration into a runnable Job by:
+    /// - Building a DAG from task definitions and dependencies
+    /// - Creating task executors (command, python, etc.)
+    /// - Applying retry policies, timeouts, and conditions
+    /// - Setting up schedules and concurrency limits
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use petit::config::{YamlLoader, JobConfigBuilder};
+    ///
+    /// let yaml = r#"
+    /// id: example
+    /// name: Example Job
+    /// tasks:
+    ///   - id: task1
+    ///     type: command
+    ///     command: echo
+    ///     args: [hello]
+    /// "#;
+    ///
+    /// let config = YamlLoader::parse_job_config(yaml)?;
+    /// let job = JobConfigBuilder::build(config)?;
+    ///
+    /// assert_eq!(job.id().as_str(), "example");
+    /// assert_eq!(job.dag().len(), 1);
+    /// # Ok::<(), petit::config::ConfigError>(())
+    /// ```
     pub fn build(config: JobConfig) -> Result<Job, ConfigError> {
         // Build the DAG from task configs
         let mut dag_builder = DagBuilder::new(&config.id, &config.name);
@@ -174,6 +206,28 @@ impl JobConfigBuilder {
 }
 
 /// Load all job configurations from a directory.
+///
+/// Reads all `.yaml` and `.yml` files in the directory, parses them as job configurations,
+/// and builds runnable Job instances. Files that are not valid YAML or do not conform
+/// to the job configuration schema will cause an error.
+///
+/// # Examples
+///
+/// ```no_run
+/// use petit::config::load_jobs_from_directory;
+///
+/// // Load all jobs from the jobs directory
+/// let jobs = load_jobs_from_directory("./jobs")?;
+///
+/// println!("Loaded {} jobs:", jobs.len());
+/// for job in &jobs {
+///     println!("  - {} ({})", job.name(), job.id());
+///     if job.is_scheduled() {
+///         println!("    Scheduled job");
+///     }
+/// }
+/// # Ok::<(), petit::config::ConfigError>(())
+/// ```
 pub fn load_jobs_from_directory(dir: impl AsRef<Path>) -> Result<Vec<Job>, ConfigError> {
     let dir = dir.as_ref();
     let mut jobs = Vec::new();
