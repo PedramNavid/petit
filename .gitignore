@@ -2,3 +2,8 @@
 *.db-*
 /target
 .claude/
+
+# Prevent accidental Node.js files (this is a Rust project)
+package.json
+package-lock.json
+node_modules/
