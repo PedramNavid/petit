@@ -63,11 +63,25 @@ impl SqliteStorage {
 
     /// Run database migrations.
     async fn run_migrations(&self) -> Result<(), StorageError> {
+        // Run initial schema
         let schema = include_str!("../../migrations/001_initial_schema.sql");
         sqlx::raw_sql(schema)
             .execute(&self.pool)
             .await
-            .map_err(|e| StorageError::Other(format!("migration failed: {}", e)))?;
+            .map_err(|e| StorageError::Other(format!("migration 001 failed: {}", e)))?;
+
+        // Run task logs migration (adds stdout, stderr, exit_code columns)
+        // This uses ALTER TABLE which will fail if columns already exist, so we ignore errors
+        let logs_migration = include_str!("../../migrations/002_add_task_logs.sql");
+        // Execute each ALTER TABLE separately since SQLite doesn't support multiple in one statement
+        for line in logs_migration.lines() {
+            let line = line.trim();
+            if line.starts_with("ALTER TABLE") {
+                // Ignore errors since column might already exist
+                let _ = sqlx::raw_sql(line).execute(&self.pool).await;
+            }
+        }
+
         Ok(())
     }
 
@@ -423,8 +437,8 @@ impl Storage for SqliteStorage {
     async fn save_task_state(&self, state: StoredTaskState) -> Result<(), StorageError> {
         let result = sqlx::query(
             r#"
-            INSERT INTO task_states (run_id, task_id, status, attempts, started_at, ended_at, duration_ms, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO task_states (run_id, task_id, status, attempts, started_at, ended_at, duration_ms, error, stdout, stderr, exit_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(state.run_id.to_string())
@@ -435,6 +449,9 @@ impl Storage for SqliteStorage {
         .bind(state.ended_at.map(system_time_to_string))
         .bind(state.duration.map(|d| d.as_millis() as i64))
         .bind(&state.error)
+        .bind(&state.stdout)
+        .bind(&state.stderr)
+        .bind(state.exit_code)
         .execute(&self.pool)
         .await;
 
@@ -455,6 +472,7 @@ impl Storage for SqliteStorage {
         run_id: &RunId,
         task_id: &TaskId,
     ) -> Result<StoredTaskState, StorageError> {
+        #[allow(clippy::type_complexity)]
         let row: (
             String,
             String,
@@ -464,8 +482,11 @@ impl Storage for SqliteStorage {
             Option<String>,
             Option<i64>,
             Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i32>,
         ) = sqlx::query_as(
-            "SELECT run_id, task_id, status, attempts, started_at, ended_at, duration_ms, error FROM task_states WHERE run_id = ? AND task_id = ?",
+            "SELECT run_id, task_id, status, attempts, started_at, ended_at, duration_ms, error, stdout, stderr, exit_code FROM task_states WHERE run_id = ? AND task_id = ?",
         )
         .bind(run_id.to_string())
         .bind(task_id.as_str())
@@ -487,10 +508,14 @@ impl Storage for SqliteStorage {
             ended_at: row.5.as_ref().map(|s| string_to_system_time(s)),
             duration: row.6.map(|ms| Duration::from_millis(ms as u64)),
             error: row.7,
+            stdout: row.8,
+            stderr: row.9,
+            exit_code: row.10,
         })
     }
 
     async fn list_task_states(&self, run_id: &RunId) -> Result<Vec<StoredTaskState>, StorageError> {
+        #[allow(clippy::type_complexity)]
         let rows: Vec<(
             String,
             String,
@@ -500,8 +525,11 @@ impl Storage for SqliteStorage {
             Option<String>,
             Option<i64>,
             Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i32>,
         )> = sqlx::query_as(
-            "SELECT run_id, task_id, status, attempts, started_at, ended_at, duration_ms, error FROM task_states WHERE run_id = ?",
+            "SELECT run_id, task_id, status, attempts, started_at, ended_at, duration_ms, error, stdout, stderr, exit_code FROM task_states WHERE run_id = ?",
         )
         .bind(run_id.to_string())
         .fetch_all(&self.pool)
@@ -523,6 +551,9 @@ impl Storage for SqliteStorage {
                     ended_at: row.5.as_ref().map(|s| string_to_system_time(s)),
                     duration: row.6.map(|ms| Duration::from_millis(ms as u64)),
                     error: row.7,
+                    stdout: row.8,
+                    stderr: row.9,
+                    exit_code: row.10,
                 })
             })
             .collect()
@@ -531,7 +562,7 @@ impl Storage for SqliteStorage {
     async fn update_task_state(&self, state: StoredTaskState) -> Result<(), StorageError> {
         let result = sqlx::query(
             r#"
-            UPDATE task_states SET status = ?, attempts = ?, started_at = ?, ended_at = ?, duration_ms = ?, error = ?
+            UPDATE task_states SET status = ?, attempts = ?, started_at = ?, ended_at = ?, duration_ms = ?, error = ?, stdout = ?, stderr = ?, exit_code = ?
             WHERE run_id = ? AND task_id = ?
             "#,
         )
@@ -541,6 +572,9 @@ impl Storage for SqliteStorage {
         .bind(state.ended_at.map(system_time_to_string))
         .bind(state.duration.map(|d| d.as_millis() as i64))
         .bind(&state.error)
+        .bind(&state.stdout)
+        .bind(&state.stderr)
+        .bind(state.exit_code)
         .bind(state.run_id.to_string())
         .bind(state.task_id.as_str())
         .execute(&self.pool)

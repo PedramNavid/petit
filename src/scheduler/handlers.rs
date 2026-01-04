@@ -27,17 +27,32 @@ impl<S: Storage + 'static> EventHandler for TaskStateUpdater<S> {
                     }
                 }
             }
-            Event::TaskCompleted { task_id, .. } => {
+            Event::TaskCompleted {
+                task_id,
+                stdout,
+                stderr,
+                exit_code,
+                ..
+            } => {
                 if let Ok(mut state) = self.storage.get_task_state(&self.run_id, task_id).await {
                     state.mark_completed();
+                    state.set_output(stdout.clone(), stderr.clone(), *exit_code);
                     if let Err(e) = self.storage.update_task_state(state).await {
                         tracing::warn!(task_id = %task_id, run_id = %self.run_id, error = %e, "Failed to update task state to completed");
                     }
                 }
             }
-            Event::TaskFailed { task_id, error, .. } => {
+            Event::TaskFailed {
+                task_id,
+                error,
+                stdout,
+                stderr,
+                exit_code,
+                ..
+            } => {
                 if let Ok(mut state) = self.storage.get_task_state(&self.run_id, task_id).await {
                     state.mark_failed(error);
+                    state.set_output(stdout.clone(), stderr.clone(), *exit_code);
                     if let Err(e) = self.storage.update_task_state(state).await {
                         tracing::warn!(task_id = %task_id, run_id = %self.run_id, error = %e, "Failed to update task state to failed");
                     }

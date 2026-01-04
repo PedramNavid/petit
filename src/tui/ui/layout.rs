@@ -8,7 +8,7 @@ use ratatui::{
 use crate::tui::app::{App, Tab};
 
 use super::tabs;
-use super::widgets::{help_bar, help_overlay, status_bar, tab_bar};
+use super::widgets::{help_bar, help_overlay, log_overlay, status_bar, tab_bar};
 
 /// Render the entire application.
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -37,6 +37,13 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // Render help overlay if active
     if app.show_help {
         help_overlay::render(frame, frame.area());
+    }
+
+    // Render log overlay if active
+    if app.show_logs
+        && let Some(task) = app.selected_task()
+    {
+        log_overlay::render(frame, frame.area(), task, app.log_scroll);
     }
 }
 

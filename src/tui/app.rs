@@ -99,6 +99,12 @@ pub struct App {
 
     /// Show help overlay.
     pub show_help: bool,
+
+    /// Show log viewer overlay.
+    pub show_logs: bool,
+
+    /// Scroll position in log viewer.
+    pub log_scroll: u16,
 }
 
 impl App {
@@ -119,6 +125,8 @@ impl App {
             last_refresh: Instant::now(),
             refreshing: false,
             show_help: false,
+            show_logs: false,
+            log_scroll: 0,
         };
 
         // Initial data load
@@ -245,6 +253,33 @@ impl App {
             return;
         }
 
+        // Handle log viewer overlay
+        if self.show_logs {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                    self.show_logs = false;
+                    self.log_scroll = 0;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.log_scroll = self.log_scroll.saturating_add(1);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.log_scroll = self.log_scroll.saturating_sub(1);
+                }
+                KeyCode::PageDown => {
+                    self.log_scroll = self.log_scroll.saturating_add(10);
+                }
+                KeyCode::PageUp => {
+                    self.log_scroll = self.log_scroll.saturating_sub(10);
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    self.log_scroll = 0;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             // Quit
             KeyCode::Char('q') | KeyCode::Esc => {
@@ -279,12 +314,20 @@ impl App {
                 self.select_last();
             }
 
-            // Drill down / go back
+            // Drill down / go back / view logs
             KeyCode::Enter => {
                 self.drill_down().await;
             }
             KeyCode::Backspace => {
                 self.go_back().await;
+            }
+
+            // View logs (on Tasks tab)
+            KeyCode::Char('l') => {
+                if self.current_tab == Tab::Tasks && self.tasks_list_state.selected().is_some() {
+                    self.show_logs = true;
+                    self.log_scroll = 0;
+                }
             }
 
             // Force refresh
@@ -406,6 +449,13 @@ impl App {
         self.runs_list_state
             .selected()
             .and_then(|i| self.runs.get(i))
+    }
+
+    /// Get the selected task.
+    pub fn selected_task(&self) -> Option<&StoredTaskState> {
+        self.tasks_list_state
+            .selected()
+            .and_then(|i| self.tasks.get(i))
     }
 
     /// Format duration for display.

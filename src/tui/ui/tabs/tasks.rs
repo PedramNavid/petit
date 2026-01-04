@@ -54,10 +54,14 @@ pub fn render(app: &mut App, frame: &mut Frame, area: Rect) {
                 String::new()
             };
 
+            // Logs indicator
+            let has_logs = task.stdout.is_some() || task.stderr.is_some();
+            let logs_icon = if has_logs { "📋" } else { "  " };
+
             // Error (truncated)
             let error_span = if let Some(ref error) = task.error {
-                let truncated = if error.len() > 40 {
-                    format!("{}...", &error[..37])
+                let truncated = if error.len() > 30 {
+                    format!("{}...", &error[..27])
                 } else {
                     error.clone()
                 };
@@ -71,6 +75,8 @@ pub fn render(app: &mut App, frame: &mut Frame, area: Rect) {
                 Span::styled(format!("{:<25}", task.task_id.as_str()), Theme::text()),
                 Span::styled(format!("{:>8}", duration), Theme::text_dim()),
                 Span::styled(attempts, Theme::text_dim()),
+                Span::raw(" "),
+                Span::raw(logs_icon),
             ];
             spans.extend(error_span);
 
