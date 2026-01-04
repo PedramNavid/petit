@@ -5,6 +5,7 @@
 //! - Recovery from interruptions
 //! - Resource contention handling
 //! - HTTP API endpoints
+//! - Graceful shutdown behavior
 
 mod common;
 
@@ -12,5 +13,6 @@ mod integration {
     pub mod api;
     pub mod recovery;
     pub mod resources;
+    pub mod shutdown;
     pub mod workflow;
 }

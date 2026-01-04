@@ -246,6 +246,8 @@ pub struct Scheduler<S: Storage> {
     /// Currently running job handles mapped to (JobId, Handle).
     #[allow(clippy::type_complexity)]
     running_jobs: Arc<RwLock<HashMap<RunId, (JobId, JoinHandle<()>)>>>,
+    /// Graceful shutdown timeout (default: 30 seconds).
+    shutdown_timeout: Duration,
 }
 
 impl<S: Storage + 'static> Scheduler<S> {
@@ -259,6 +261,7 @@ impl<S: Storage + 'static> Scheduler<S> {
             tick_interval: Duration::from_secs(1),
             max_concurrent_jobs: None,
             running_jobs: Arc::new(RwLock::new(HashMap::new())),
+            shutdown_timeout: Duration::from_secs(30),
         }
     }
 
@@ -272,6 +275,7 @@ impl<S: Storage + 'static> Scheduler<S> {
             tick_interval: Duration::from_secs(1),
             max_concurrent_jobs: None,
             running_jobs: Arc::new(RwLock::new(HashMap::new())),
+            shutdown_timeout: Duration::from_secs(30),
         }
     }
 
@@ -296,6 +300,12 @@ impl<S: Storage + 'static> Scheduler<S> {
     /// Set the maximum concurrent jobs.
     pub fn with_max_concurrent_jobs(mut self, max: usize) -> Self {
         self.max_concurrent_jobs = Some(max);
+        self
+    }
+
+    /// Set the graceful shutdown timeout.
+    pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_timeout = timeout;
         self
     }
 
@@ -468,6 +478,11 @@ impl<S: Storage + 'static> Scheduler<S> {
                         SchedulerCommand::Shutdown { response } => {
                             let mut s = state.write().await;
                             *s = SchedulerState::Stopped;
+                            drop(s); // Release the lock before waiting
+
+                            // Wait for running jobs to complete with timeout
+                            self.await_running_jobs().await;
+
                             let _ = response.send(());
                             break;
                         }
@@ -705,6 +720,52 @@ impl<S: Storage + 'static> Scheduler<S> {
     async fn cleanup_finished_jobs(&self) {
         let mut running = self.running_jobs.write().await;
         running.retain(|_, (_, handle)| !handle.is_finished());
+    }
+
+    /// Wait for all running jobs to complete with a timeout.
+    async fn await_running_jobs(&self) {
+        let running_count = self.running_jobs.read().await.len();
+
+        if running_count == 0 {
+            tracing::info!("No running jobs to wait for during shutdown");
+            return;
+        }
+
+        tracing::info!(
+            "Graceful shutdown: waiting for {} running job(s) to complete (timeout: {:?})",
+            running_count,
+            self.shutdown_timeout
+        );
+
+        let start = tokio::time::Instant::now();
+        let deadline = start + self.shutdown_timeout;
+
+        loop {
+            // Check if all jobs are done
+            let mut running = self.running_jobs.write().await;
+            running.retain(|_, (_, handle)| !handle.is_finished());
+            let remaining = running.len();
+            drop(running);
+
+            if remaining == 0 {
+                let elapsed = start.elapsed();
+                tracing::info!("All running jobs completed gracefully in {:?}", elapsed);
+                break;
+            }
+
+            // Check if we've exceeded the timeout
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "Graceful shutdown timeout ({:?}) exceeded with {} job(s) still running",
+                    self.shutdown_timeout,
+                    remaining
+                );
+                break;
+            }
+
+            // Wait a bit before checking again
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
 
