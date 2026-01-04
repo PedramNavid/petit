@@ -13,9 +13,11 @@ use crate::core::retry::{RetryCondition, RetryPolicy};
 use crate::core::schedule::Schedule;
 use crate::execution::CommandTask;
 
-use super::yaml::{
-    ConfigError, JobConfig, RetryConditionConfig, TaskConditionConfig, TaskTypeConfig, YamlLoader,
+use super::error::ConfigError;
+use super::types::{
+    JobConfig, RetryConditionConfig, TaskConditionConfig, TaskConfig, TaskTypeConfig,
 };
+use super::yaml::YamlLoader;
 
 /// Builder for creating Jobs from YAML configuration.
 ///
@@ -120,7 +122,7 @@ impl JobConfigBuilder {
     /// Build a Task from TaskConfig.
     fn build_task(
         job_name: &str,
-        config: &super::yaml::TaskConfig,
+        config: &TaskConfig,
     ) -> Result<Arc<dyn crate::core::task::Task>, ConfigError> {
         match &config.task_type {
             TaskTypeConfig::Command {
@@ -194,7 +196,7 @@ impl JobConfigBuilder {
     }
 
     /// Build a RetryPolicy from RetryConfig.
-    fn build_retry_policy(config: &super::yaml::RetryConfig) -> RetryPolicy {
+    fn build_retry_policy(config: &super::types::RetryConfig) -> RetryPolicy {
         let delay = Duration::from_secs(config.delay_secs);
         let condition = match config.condition {
             RetryConditionConfig::Always => RetryCondition::Always,

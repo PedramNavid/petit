@@ -300,9 +300,15 @@
 //! Invalid configurations will return a [`ConfigError`] with details about the issue.
 
 mod builder;
+mod error;
+mod types;
 mod yaml;
 
 pub use builder::{JobConfigBuilder, load_jobs_from_directory};
-pub use yaml::{
-    ConfigError, GlobalConfig, JobConfig, RetryConfig, ScheduleConfig, TaskConfig, YamlLoader,
+pub use error::ConfigError;
+pub use types::{
+    GlobalConfig, JobConfig, JobDependencyConditionConfig, JobDependencyConfig,
+    RetryConditionConfig, RetryConfig, ScheduleConfig, StorageConfig, TaskConditionConfig,
+    TaskConfig, TaskTypeConfig,
 };
+pub use yaml::YamlLoader;

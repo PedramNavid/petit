@@ -11,223 +11,27 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use thiserror::Error;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::core::context::TaskContext;
 use crate::core::job::{DependencyCondition, Job};
 use crate::core::types::{JobId, RunId, TaskId};
-use crate::events::{Event, EventBus, EventHandler};
+use crate::events::{Event, EventBus};
 use crate::execution::DagExecutor;
-use crate::storage::{RunStatus, Storage, StorageError, StoredJob, StoredRun, StoredTaskState};
+use crate::storage::{RunStatus, Storage, StoredJob, StoredRun, StoredTaskState};
 
-/// Buffer size for the command channel between SchedulerHandle and Scheduler.
-const COMMAND_CHANNEL_BUFFER: usize = 32;
+// Re-export public types
+pub use super::handle::SchedulerHandle;
+pub use super::types::{SchedulerError, SchedulerState};
+
+// Import internal types
+use super::handle::COMMAND_CHANNEL_BUFFER;
+use super::handlers::{EventForwarder, TaskStateUpdater};
+use super::types::SchedulerCommand;
 
 /// Number of most recent runs to check when evaluating job dependencies.
 const DEPENDENCY_CHECK_LIMIT: usize = 1;
-
-/// Event handler that updates task states in storage as tasks execute.
-struct TaskStateUpdater<S: Storage> {
-    storage: Arc<S>,
-    run_id: RunId,
-}
-
-#[async_trait::async_trait]
-impl<S: Storage + 'static> EventHandler for TaskStateUpdater<S> {
-    async fn handle(&self, event: &Event) {
-        match event {
-            Event::TaskStarted { task_id, .. } => {
-                if let Ok(mut state) = self.storage.get_task_state(&self.run_id, task_id).await {
-                    state.mark_running();
-                    if let Err(e) = self.storage.update_task_state(state).await {
-                        tracing::warn!(task_id = %task_id, run_id = %self.run_id, error = %e, "Failed to update task state to running");
-                    }
-                }
-            }
-            Event::TaskCompleted { task_id, .. } => {
-                if let Ok(mut state) = self.storage.get_task_state(&self.run_id, task_id).await {
-                    state.mark_completed();
-                    if let Err(e) = self.storage.update_task_state(state).await {
-                        tracing::warn!(task_id = %task_id, run_id = %self.run_id, error = %e, "Failed to update task state to completed");
-                    }
-                }
-            }
-            Event::TaskFailed { task_id, error, .. } => {
-                if let Ok(mut state) = self.storage.get_task_state(&self.run_id, task_id).await {
-                    state.mark_failed(error);
-                    if let Err(e) = self.storage.update_task_state(state).await {
-                        tracing::warn!(task_id = %task_id, run_id = %self.run_id, error = %e, "Failed to update task state to failed");
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Event handler that forwards events to another event bus.
-struct EventForwarder {
-    target: Arc<EventBus>,
-}
-
-#[async_trait::async_trait]
-impl EventHandler for EventForwarder {
-    async fn handle(&self, event: &Event) {
-        self.target.emit(event.clone()).await;
-    }
-}
-
-/// Errors that can occur in the scheduler.
-#[derive(Debug, Error)]
-pub enum SchedulerError {
-    /// Job not found.
-    #[error("job not found: {0}")]
-    JobNotFound(String),
-
-    /// Storage error.
-    #[error("storage error: {0}")]
-    Storage(#[from] StorageError),
-
-    /// Channel error.
-    #[error("channel error: {0}")]
-    ChannelError(String),
-
-    /// Job dependency not satisfied.
-    #[error("job dependency not satisfied: {0}")]
-    DependencyNotSatisfied(String),
-
-    /// Max concurrent runs exceeded.
-    #[error("max concurrent runs exceeded for job: {0}")]
-    MaxConcurrentRunsExceeded(String),
-}
-
-/// State of the scheduler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchedulerState {
-    /// Scheduler is stopped.
-    Stopped,
-    /// Scheduler is running.
-    Running,
-    /// Scheduler is paused.
-    Paused,
-}
-
-/// Commands that can be sent to the scheduler.
-enum SchedulerCommand {
-    /// Trigger a job manually.
-    Trigger {
-        job_id: JobId,
-        response: oneshot::Sender<Result<RunId, SchedulerError>>,
-    },
-    /// Pause the scheduler.
-    Pause { response: oneshot::Sender<()> },
-    /// Resume the scheduler.
-    Resume { response: oneshot::Sender<()> },
-    /// Shutdown the scheduler.
-    Shutdown { response: oneshot::Sender<()> },
-}
-
-/// Handle for controlling the scheduler.
-#[derive(Clone)]
-pub struct SchedulerHandle {
-    command_tx: mpsc::Sender<SchedulerCommand>,
-    state: Arc<RwLock<SchedulerState>>,
-}
-
-impl SchedulerHandle {
-    /// Helper to send a command that returns a result and wait for response.
-    async fn send_result_command<T>(
-        &self,
-        build_command: impl FnOnce(oneshot::Sender<Result<T, SchedulerError>>) -> SchedulerCommand,
-        operation: &str,
-    ) -> Result<T, SchedulerError>
-    where
-        T: Send + 'static,
-    {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.command_tx
-            .send(build_command(response_tx))
-            .await
-            .map_err(|_| {
-                SchedulerError::ChannelError(format!("failed to send {} command", operation))
-            })?;
-
-        response_rx.await.map_err(|_| {
-            SchedulerError::ChannelError(format!("failed to receive {} response", operation))
-        })?
-    }
-
-    /// Helper to send a command that returns unit and wait for response.
-    async fn send_unit_command(
-        &self,
-        build_command: impl FnOnce(oneshot::Sender<()>) -> SchedulerCommand,
-        operation: &str,
-    ) -> Result<(), SchedulerError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.command_tx
-            .send(build_command(response_tx))
-            .await
-            .map_err(|_| {
-                SchedulerError::ChannelError(format!("failed to send {} command", operation))
-            })?;
-
-        response_rx.await.map_err(|_| {
-            SchedulerError::ChannelError(format!("failed to receive {} response", operation))
-        })?;
-
-        Ok(())
-    }
-
-    /// Trigger a job manually.
-    pub async fn trigger(&self, job_id: impl Into<JobId>) -> Result<RunId, SchedulerError> {
-        let job_id = job_id.into();
-        self.send_result_command(
-            |response| SchedulerCommand::Trigger { job_id, response },
-            "trigger",
-        )
-        .await
-    }
-
-    /// Pause the scheduler.
-    ///
-    /// While paused, scheduled jobs will not be triggered, but manual triggers still work.
-    pub async fn pause(&self) -> Result<(), SchedulerError> {
-        self.send_unit_command(|response| SchedulerCommand::Pause { response }, "pause")
-            .await
-    }
-
-    /// Resume the scheduler after being paused.
-    pub async fn resume(&self) -> Result<(), SchedulerError> {
-        self.send_unit_command(|response| SchedulerCommand::Resume { response }, "resume")
-            .await
-    }
-
-    /// Shutdown the scheduler.
-    pub async fn shutdown(&self) -> Result<(), SchedulerError> {
-        self.send_unit_command(
-            |response| SchedulerCommand::Shutdown { response },
-            "shutdown",
-        )
-        .await
-    }
-
-    /// Get the current scheduler state.
-    pub async fn state(&self) -> SchedulerState {
-        *self.state.read().await
-    }
-
-    /// Check if the scheduler is running.
-    pub async fn is_running(&self) -> bool {
-        *self.state.read().await == SchedulerState::Running
-    }
-
-    /// Check if the scheduler is paused.
-    pub async fn is_paused(&self) -> bool {
-        *self.state.read().await == SchedulerState::Paused
-    }
-}
 
 /// Main scheduler for job execution.
 pub struct Scheduler<S: Storage> {
@@ -776,6 +580,7 @@ mod tests {
     use crate::core::job::JobDependency;
     use crate::core::schedule::Schedule;
     use crate::core::task::{Task, TaskError};
+    use crate::events::EventHandler;
     use crate::storage::InMemoryStorage;
     use async_trait::async_trait;
     use tokio::sync::Mutex;
@@ -822,7 +627,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::events::EventHandler for RecordingHandler {
+    impl EventHandler for RecordingHandler {
         async fn handle(&self, event: &Event) {
             self.events.lock().await.push(event.clone());
         }
@@ -1247,6 +1052,7 @@ mod tests {
 
     mod failing_storage {
         use super::*;
+        use crate::storage::{StorageError, StoredJob, StoredRun, StoredTaskState};
         use std::sync::atomic::{AtomicBool, Ordering};
 
         /// A storage wrapper that can be configured to fail specific operations.

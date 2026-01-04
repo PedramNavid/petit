@@ -4,5 +4,8 @@
 //! at scheduled times and handles recovery from interruptions.
 
 mod engine;
+mod handle;
+mod handlers;
+mod types;
 
 pub use engine::{Scheduler, SchedulerError, SchedulerHandle, SchedulerState};
