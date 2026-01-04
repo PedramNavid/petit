@@ -1,4 +1,4 @@
-//! Job builder from YAML configuration.
+//! Job builder from TOML configuration.
 //!
 //! This module converts JobConfig into runnable Job instances with DAGs.
 
@@ -14,21 +14,21 @@ use crate::core::schedule::Schedule;
 use crate::execution::CommandTask;
 
 use super::error::ConfigError;
+use super::toml::TomlLoader;
 use super::types::{
     JobConfig, RetryConditionConfig, TaskConditionConfig, TaskConfig, TaskTypeConfig,
 };
-use super::yaml::YamlLoader;
 
-/// Builder for creating Jobs from YAML configuration.
+/// Builder for creating Jobs from TOML configuration.
 ///
-/// Converts parsed YAML job configurations into runnable [`Job`] instances
+/// Converts parsed TOML job configurations into runnable [`Job`] instances
 /// with fully constructed DAGs, task executors, and scheduling information.
 pub struct JobConfigBuilder;
 
 impl JobConfigBuilder {
     /// Build a Job from a JobConfig.
     ///
-    /// This method converts a parsed YAML configuration into a runnable Job by:
+    /// This method converts a parsed TOML configuration into a runnable Job by:
     /// - Building a DAG from task definitions and dependencies
     /// - Creating task executors (command, python, etc.)
     /// - Applying retry policies, timeouts, and conditions
@@ -37,19 +37,20 @@ impl JobConfigBuilder {
     /// # Examples
     ///
     /// ```
-    /// use petit::config::{YamlLoader, JobConfigBuilder};
+    /// use petit::config::{TomlLoader, JobConfigBuilder};
     ///
-    /// let yaml = r#"
-    /// id: example
-    /// name: Example Job
-    /// tasks:
-    ///   - id: task1
-    ///     type: command
-    ///     command: echo
-    ///     args: [hello]
+    /// let toml = r#"
+    /// id = "example"
+    /// name = "Example Job"
+    ///
+    /// [[tasks]]
+    /// id = "task1"
+    /// type = "command"
+    /// command = "echo"
+    /// args = ["hello"]
     /// "#;
     ///
-    /// let config = YamlLoader::parse_job_config(yaml)?;
+    /// let config = TomlLoader::parse_job_config(toml)?;
     /// let job = JobConfigBuilder::build(config)?;
     ///
     /// assert_eq!(job.id().as_str(), "example");
@@ -95,7 +96,7 @@ impl JobConfigBuilder {
         // Add job-level config
         let mut job_config_map = std::collections::HashMap::new();
         for (key, value) in &config.config {
-            // Convert serde_yaml::Value to serde_json::Value
+            // Convert toml::Value to serde_json::Value
             let json_value = serde_json::to_value(value).map_err(|e| {
                 ConfigError::InvalidConfig(format!(
                     "Job '{}': failed to convert config key '{}': {}",
@@ -219,8 +220,8 @@ impl JobConfigBuilder {
 
 /// Load all job configurations from a directory.
 ///
-/// Reads all `.yaml` and `.yml` files in the directory, parses them as job configurations,
-/// and builds runnable Job instances. Files that are not valid YAML or do not conform
+/// Reads all `.toml` files in the directory, parses them as job configurations,
+/// and builds runnable Job instances. Files that are not valid TOML or do not conform
 /// to the job configuration schema will cause an error.
 ///
 /// # Examples
@@ -256,11 +257,11 @@ pub fn load_jobs_from_directory(dir: impl AsRef<Path>) -> Result<Vec<Job>, Confi
         })?;
         let path = entry.path();
 
-        // Only process .yaml and .yml files
+        // Only process .toml files
         if let Some(ext) = path.extension()
-            && (ext == "yaml" || ext == "yml")
+            && ext == "toml"
         {
-            let config = YamlLoader::load_job_config(&path)?;
+            let config = TomlLoader::load_job_config(&path)?;
             let job = JobConfigBuilder::build(config)?;
             jobs.push(job);
         }
@@ -275,17 +276,18 @@ mod tests {
 
     #[test]
     fn test_build_simple_job() {
-        let yaml = r#"
-id: simple_job
-name: Simple Job
-tasks:
-  - id: hello
-    type: command
-    command: echo
-    args: ["Hello, World!"]
+        let toml = r#"
+id = "simple_job"
+name = "Simple Job"
+
+[[tasks]]
+id = "hello"
+type = "command"
+command = "echo"
+args = ["Hello, World!"]
 "#;
 
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let job = JobConfigBuilder::build(config).unwrap();
 
         assert_eq!(job.id().as_str(), "simple_job");
@@ -295,18 +297,19 @@ tasks:
 
     #[test]
     fn test_build_job_with_schedule() {
-        let yaml = r#"
-id: scheduled_job
-name: Scheduled Job
-schedule: "0 0 * * * *"
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    args: ["scheduled"]
+        let toml = r#"
+id = "scheduled_job"
+name = "Scheduled Job"
+schedule = "0 0 * * * *"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+args = ["scheduled"]
 "#;
 
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let job = JobConfigBuilder::build(config).unwrap();
 
         assert!(job.is_scheduled());
@@ -314,27 +317,32 @@ tasks:
 
     #[test]
     fn test_build_job_with_dependencies() {
-        let yaml = r#"
-id: pipeline
-name: Pipeline
-tasks:
-  - id: extract
-    type: command
-    command: echo
-    args: ["extract"]
-  - id: transform
-    type: command
-    command: echo
-    args: ["transform"]
-    depends_on: [extract]
-  - id: load
-    type: command
-    command: echo
-    args: ["load"]
-    depends_on: [transform]
+        let toml = r#"
+id = "pipeline"
+name = "Pipeline"
+
+[[tasks]]
+id = "extract"
+type = "command"
+command = "echo"
+args = ["extract"]
+
+[[tasks]]
+id = "transform"
+type = "command"
+command = "echo"
+args = ["transform"]
+depends_on = ["extract"]
+
+[[tasks]]
+id = "load"
+type = "command"
+command = "echo"
+args = ["load"]
+depends_on = ["transform"]
 "#;
 
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let job = JobConfigBuilder::build(config).unwrap();
 
         assert_eq!(job.dag().len(), 3);
@@ -346,26 +354,31 @@ tasks:
 
     #[test]
     fn test_build_job_with_conditions() {
-        let yaml = r#"
-id: conditional_job
-name: Conditional Job
-tasks:
-  - id: main
-    type: command
-    command: ./run.sh
-  - id: cleanup
-    type: command
-    command: ./cleanup.sh
-    depends_on: [main]
-    condition: all_done
-  - id: notify_error
-    type: command
-    command: ./notify.sh
-    depends_on: [main]
-    condition: on_failure
+        let toml = r#"
+id = "conditional_job"
+name = "Conditional Job"
+
+[[tasks]]
+id = "main"
+type = "command"
+command = "./run.sh"
+
+[[tasks]]
+id = "cleanup"
+type = "command"
+command = "./cleanup.sh"
+depends_on = ["main"]
+condition = "all_done"
+
+[[tasks]]
+id = "notify_error"
+type = "command"
+command = "./notify.sh"
+depends_on = ["main"]
+condition = "on_failure"
 "#;
 
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let job = JobConfigBuilder::build(config).unwrap();
 
         assert_eq!(job.dag().len(), 3);
@@ -373,20 +386,22 @@ tasks:
 
     #[test]
     fn test_build_job_with_retry() {
-        let yaml = r#"
-id: retry_job
-name: Retry Job
-tasks:
-  - id: flaky
-    type: command
-    command: ./flaky.sh
-    retry:
-      max_attempts: 5
-      delay_secs: 10
-      condition: always
+        let toml = r#"
+id = "retry_job"
+name = "Retry Job"
+
+[[tasks]]
+id = "flaky"
+type = "command"
+command = "./flaky.sh"
+
+[tasks.retry]
+max_attempts = 5
+delay_secs = 10
+condition = "always"
 "#;
 
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let job = JobConfigBuilder::build(config).unwrap();
 
         assert_eq!(job.dag().len(), 1);
@@ -394,17 +409,18 @@ tasks:
 
     #[test]
     fn test_build_python_task() {
-        let yaml = r#"
-id: python_job
-name: Python Job
-tasks:
-  - id: script
-    type: python
-    script: print("hello")
-    inline: true
+        let toml = r#"
+id = "python_job"
+name = "Python Job"
+
+[[tasks]]
+id = "script"
+type = "python"
+script = "print(\"hello\")"
+inline = true
 "#;
 
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let job = JobConfigBuilder::build(config).unwrap();
 
         assert_eq!(job.dag().len(), 1);
@@ -412,20 +428,22 @@ tasks:
 
     #[test]
     fn test_build_job_with_config() {
-        let yaml = r#"
-id: config_job
-name: Config Job
-config:
-  batch_size: 1000
-  debug: true
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    args: ["test"]
+        let toml = r#"
+id = "config_job"
+name = "Config Job"
+
+[config]
+batch_size = 1000
+debug = true
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+args = ["test"]
 "#;
 
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let job = JobConfigBuilder::build(config).unwrap();
 
         assert_eq!(job.get_config::<i32>("batch_size"), Some(1000));
@@ -434,18 +452,19 @@ tasks:
 
     #[test]
     fn test_build_disabled_job() {
-        let yaml = r#"
-id: disabled_job
-name: Disabled Job
-enabled: false
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    args: ["test"]
+        let toml = r#"
+id = "disabled_job"
+name = "Disabled Job"
+enabled = false
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+args = ["test"]
 "#;
 
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let job = JobConfigBuilder::build(config).unwrap();
 
         assert!(!job.is_enabled());

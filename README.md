@@ -11,7 +11,7 @@ Importantly, I needed
 - Tasks and Jobs that can form dependencies
 - Simple observability
 - Concurrency
-- YAML configuration
+- TOML configuration
 
 And so I built this.
 
@@ -23,7 +23,7 @@ No! I built this to see what it would take to build an orchestrator with Claude 
 
 - **DAG-based execution** — Define task dependencies; independent tasks run in parallel
 - **Cron scheduling** — Standard cron expressions with timezone support
-- **YAML configuration** — Define jobs declaratively
+- **TOML configuration** — Define jobs declaratively
 - **Retry policies** — Configurable retries with fixed delays
 - **Conditional execution** — Run tasks based on upstream success/failure
 - **Cross-job dependencies** — Jobs can depend on other jobs
@@ -60,16 +60,16 @@ There are example jobs in ./examples. You can use those or follow these instruct
 
 ### 1. Create a job file
 
-```yaml
-# jobs/hello.yaml
-id: hello_world
-name: Hello World Job
+```toml
+# jobs/hello.toml
+id = "hello_world"
+name = "Hello World Job"
 
-tasks:
-  - id: greet
-    type: command
-    command: echo
-    args: ["Hello, World from Petit!"]
+[[tasks]]
+id = "greet"
+type = "command"
+command = "echo"
+args = ["Hello, World from Petit!"]
 ```
 
 ### 2. Run the scheduler
@@ -117,44 +117,48 @@ pt trigger <jobs-dir> <job-id>  # Trigger a job manually
 
 ## Job Configuration
 
-Jobs are defined in YAML files:
+Jobs are defined in TOML files:
 
-```yaml
-id: data_pipeline
-name: Data Pipeline
-schedule: "0 0 2 * * *" # 2 AM daily (6-field cron: sec min hour day month weekday)
-enabled: true
-max_concurrency: 1
+```toml
+id = "data_pipeline"
+name = "Data Pipeline"
+schedule = "0 0 2 * * *"  # 2 AM daily (6-field cron: sec min hour day month weekday)
+enabled = true
+max_concurrency = 1
 
-config:
-  batch_size: 1000
-  output_dir: /tmp/data
+[config]
+batch_size = 1000
+output_dir = "/tmp/data"
 
-tasks:
-  - id: extract
-    type: command
-    command: python
-    args: ["scripts/extract.py"]
-    environment:
-      STAGE: extract
+[[tasks]]
+id = "extract"
+type = "command"
+command = "python"
+args = ["scripts/extract.py"]
 
-  - id: transform
-    type: command
-    command: python
-    args: ["scripts/transform.py"]
-    depends_on: [extract]
-    condition: all_success
-    retry:
-      max_attempts: 3
-      delay_secs: 10
-      condition: always
+[tasks.environment]
+STAGE = "extract"
 
-  - id: notify
-    type: command
-    command: echo
-    args: ["Pipeline done"]
-    depends_on: [transform]
-    condition: all_done # Runs regardless of upstream success/failure
+[[tasks]]
+id = "transform"
+type = "command"
+command = "python"
+args = ["scripts/transform.py"]
+depends_on = ["extract"]
+condition = "all_success"
+
+[tasks.retry]
+max_attempts = 3
+delay_secs = 10
+condition = "always"
+
+[[tasks]]
+id = "notify"
+type = "command"
+command = "echo"
+args = ["Pipeline done"]
+depends_on = ["transform"]
+condition = "all_done"  # Runs regardless of upstream success/failure
 ```
 
 ### Task Conditions
@@ -168,21 +172,22 @@ tasks:
 
 ### Retry Configuration
 
-```yaml
-retry:
-  max_attempts: 3 # Number of retries (0 = no retries)
-  delay_secs: 5 # Fixed delay between attempts
-  condition: always # always | transient_only | never
+```toml
+[tasks.retry]
+max_attempts = 3     # Number of retries (0 = no retries)
+delay_secs = 5       # Fixed delay between attempts
+condition = "always" # always | transient_only | never
 ```
 
 ### Cross-Job Dependencies
 
-```yaml
-id: downstream_job
-name: Downstream Job
-depends_on:
-  - job_id: upstream_job
-    condition: last_success # last_success | last_complete | within_window
+```toml
+id = "downstream_job"
+name = "Downstream Job"
+
+[[depends_on]]
+job = "upstream_job"
+condition = "last_success"  # last_success | last_complete | within_window
 ```
 
 ## Architecture

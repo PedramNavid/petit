@@ -1,9 +1,0 @@
-# Simple hello world job
-id: hello_world
-name: Hello World Job
-
-tasks:
-  - id: greet
-    type: command
-    command: echo
-    args: ["Hello, World from Petit!"]

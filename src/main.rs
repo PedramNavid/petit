@@ -41,7 +41,7 @@ struct Cli {
 enum Commands {
     /// Run the scheduler with jobs from a directory
     Run {
-        /// Path to the directory containing job YAML files
+        /// Path to the directory containing job TOML files
         #[arg(value_name = "JOBS_DIR")]
         jobs_dir: PathBuf,
 
@@ -80,21 +80,21 @@ enum Commands {
 
     /// Validate job configurations without running
     Validate {
-        /// Path to the directory containing job YAML files
+        /// Path to the directory containing job TOML files
         #[arg(value_name = "JOBS_DIR")]
         jobs_dir: PathBuf,
     },
 
     /// List all jobs in the directory
     List {
-        /// Path to the directory containing job YAML files
+        /// Path to the directory containing job TOML files
         #[arg(value_name = "JOBS_DIR")]
         jobs_dir: PathBuf,
     },
 
     /// Trigger a job manually (one-shot execution)
     Trigger {
-        /// Path to the directory containing job YAML files
+        /// Path to the directory containing job TOML files
         #[arg(value_name = "JOBS_DIR")]
         jobs_dir: PathBuf,
 

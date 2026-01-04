@@ -1,0 +1,10 @@
+# Simple job that runs every minute - useful for testing
+id = "minute_tick"
+name = "Minute Tick"
+schedule = "* * * * *"  # Every minute
+
+[[tasks]]
+id = "tick"
+type = "command"
+command = "date"
+args = ["+%Y-%m-%d %H:%M:%S - tick"]

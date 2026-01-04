@@ -1,75 +1,77 @@
-//! API Sketch: How users will define and run jobs via YAML
+//! API Sketch: How users will define and run jobs via TOML
 //!
 //! This test demonstrates the actual user experience using petit's
-//! YAML configuration and execution infrastructure.
+//! TOML configuration and execution infrastructure.
 
 use async_trait::async_trait;
 use petit::{
     CommandTask, DagBuilder, DagExecutor, Environment, Job, JobBuilder, Schedule, Task,
-    TaskCondition, TaskContext, TaskError, TaskExecutor, TaskId, YamlLoader,
+    TaskCondition, TaskContext, TaskError, TaskExecutor, TaskId, TomlLoader,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-/// This is what a user's YAML job definition looks like:
+/// This is what a user's TOML job definition looks like:
 ///
-/// ```yaml
-/// # jobs/etl_pipeline.yaml
-/// id: etl_pipeline
-/// name: ETL Pipeline
-/// schedule: "0 0 2 * * *"  # 2 AM daily
-///
-/// # Job-level environment (inherited by all tasks)
-/// environment:
-///   LOG_LEVEL: info
-///   DATA_DIR: /data
+/// ```toml
+/// # jobs/etl_pipeline.toml
+/// id = "etl_pipeline"
+/// name = "ETL Pipeline"
+/// schedule = "0 0 2 * * *"  # 2 AM daily
 ///
 /// # Job-level config (accessible via context)
-/// config:
-///   input_path: /data/raw
-///   output_path: /data/processed
+/// [config]
+/// input_path = "/data/raw"
+/// output_path = "/data/processed"
 ///
-/// tasks:
-///   - id: extract
-///     type: command
-///     command: python
-///     args: ["scripts/extract.py", "--input", "/data/raw"]
-///     environment:
-///       DATABASE_URL: postgres://localhost/source
-///       BATCH_SIZE: "1000"
-///     retry:
-///       max_attempts: 3
-///       delay_secs: 60
+/// [[tasks]]
+/// id = "extract"
+/// type = "command"
+/// command = "python"
+/// args = ["scripts/extract.py", "--input", "/data/raw"]
 ///
-///   - id: transform
-///     type: command
-///     command: python
-///     args: ["scripts/transform.py"]
-///     depends_on: [extract]
-///     environment:
-///       SPARK_MASTER: local[4]
+/// [tasks.environment]
+/// DATABASE_URL = "postgres://localhost/source"
+/// BATCH_SIZE = "1000"
 ///
-///   - id: validate
-///     type: command
-///     command: python
-///     args: ["scripts/validate.py"]
-///     depends_on: [transform]
-///     condition: all_success
+/// [tasks.retry]
+/// max_attempts = 3
+/// delay_secs = 60
 ///
-///   - id: notify_success
-///     type: command
-///     command: bash
-///     args: ["-c", "echo 'Pipeline completed!'"]
-///     depends_on: [validate]
-///     condition: all_success
+/// [[tasks]]
+/// id = "transform"
+/// type = "command"
+/// command = "python"
+/// args = ["scripts/transform.py"]
+/// depends_on = ["extract"]
 ///
-///   - id: notify_failure
-///     type: command
-///     command: bash
-///     args: ["-c", "echo 'Pipeline failed!'"]
-///     depends_on: [validate]
-///     condition: on_failure
+/// [tasks.environment]
+/// SPARK_MASTER = "local[4]"
+///
+/// [[tasks]]
+/// id = "validate"
+/// type = "command"
+/// command = "python"
+/// args = ["scripts/validate.py"]
+/// depends_on = ["transform"]
+/// condition = "all_success"
+///
+/// [[tasks]]
+/// id = "notify_success"
+/// type = "command"
+/// command = "bash"
+/// args = ["-c", "echo 'Pipeline completed!'"]
+/// depends_on = ["validate"]
+/// condition = "all_success"
+///
+/// [[tasks]]
+/// id = "notify_failure"
+/// type = "command"
+/// command = "bash"
+/// args = ["-c", "echo 'Pipeline failed!'"]
+/// depends_on = ["validate"]
+/// condition = "on_failure"
 /// ```
 // A simple mock task for testing DAG construction without running commands
 struct MockCommandTask {
@@ -126,9 +128,9 @@ fn create_test_context() -> TaskContext {
 }
 
 #[test]
-fn test_yaml_like_dag_construction() {
-    // This demonstrates how the YAML loader would construct a DAG
-    // Users write YAML, we parse it into this structure
+fn test_toml_like_dag_construction() {
+    // This demonstrates how the TOML loader would construct a DAG
+    // Users write TOML, we parse it into this structure
 
     let dag = DagBuilder::new("etl_pipeline", "ETL Pipeline")
         .add_task(MockCommandTask::create(
@@ -184,12 +186,12 @@ fn test_task_with_environment() {
 
 #[test]
 fn test_environment_merging() {
-    // Job-level environment (from YAML job definition)
+    // Job-level environment (from TOML job definition)
     let job_env = Environment::new()
         .with_var("LOG_LEVEL", "info")
         .with_var("DATA_DIR", "/data");
 
-    // Task-level environment (from YAML task definition)
+    // Task-level environment (from TOML task definition)
     let task_env = Environment::new()
         .with_var("LOG_LEVEL", "debug") // Override job-level
         .with_var("DATABASE_URL", "postgres://localhost/db");
@@ -282,7 +284,7 @@ fn test_config_access() {
 
     let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
 
-    // Job-level config (would come from YAML)
+    // Job-level config (would come from TOML)
     let mut config = HashMap::new();
     config.insert("input_path".to_string(), json!("/data/raw"));
     config.insert("output_path".to_string(), json!("/data/processed"));
@@ -304,33 +306,38 @@ fn test_config_access() {
 
 /// Example of what a more complex diamond dependency would look like:
 ///
-/// ```yaml
-/// tasks:
-///   - id: fetch_users
-///     type: command
-///     command: python
-///     args: ["fetch_users.py"]
-///     environment:
-///       DB_HOST: users-db.internal
+/// ```toml
+/// [[tasks]]
+/// id = "fetch_users"
+/// type = "command"
+/// command = "python"
+/// args = ["fetch_users.py"]
 ///
-///   - id: fetch_orders
-///     type: command
-///     command: python
-///     args: ["fetch_orders.py"]
-///     environment:
-///       DB_HOST: orders-db.internal
+/// [tasks.environment]
+/// DB_HOST = "users-db.internal"
 ///
-///   - id: join_data
-///     type: command
-///     command: python
-///     args: ["join.py"]
-///     depends_on: [fetch_users, fetch_orders]
+/// [[tasks]]
+/// id = "fetch_orders"
+/// type = "command"
+/// command = "python"
+/// args = ["fetch_orders.py"]
 ///
-///   - id: generate_report
-///     type: command
-///     command: python
-///     args: ["report.py"]
-///     depends_on: [join_data]
+/// [tasks.environment]
+/// DB_HOST = "orders-db.internal"
+///
+/// [[tasks]]
+/// id = "join_data"
+/// type = "command"
+/// command = "python"
+/// args = ["join.py"]
+/// depends_on = ["fetch_users", "fetch_orders"]
+///
+/// [[tasks]]
+/// id = "generate_report"
+/// type = "command"
+/// command = "python"
+/// args = ["report.py"]
+/// depends_on = ["join_data"]
 /// ```
 #[test]
 fn test_diamond_dependency() {
@@ -501,23 +508,24 @@ async fn test_parallel_execution() {
 }
 
 #[test]
-fn test_yaml_loading() {
-    // Test loading a job from YAML configuration
-    let yaml = r#"
-id: test_job
-name: Test Job
-schedule: "0 0 * * * *"
+fn test_toml_loading() {
+    // Test loading a job from TOML configuration
+    let toml = r#"
+id = "test_job"
+name = "Test Job"
+schedule = "0 0 * * * *"
 
-tasks:
-  - id: greet
-    type: command
-    command: echo
-    args: ["Hello, World!"]
-    environment:
-      GREETING: Hello
+[[tasks]]
+id = "greet"
+type = "command"
+command = "echo"
+args = ["Hello, World!"]
+
+[tasks.environment]
+GREETING = "Hello"
 "#;
 
-    let job_config = YamlLoader::parse_job_config(yaml).expect("Should parse YAML");
+    let job_config = TomlLoader::parse_job_config(toml).expect("Should parse TOML");
 
     assert_eq!(job_config.id, "test_job");
     assert_eq!(job_config.name, "Test Job");
@@ -662,29 +670,34 @@ fn test_job_with_config() {
 }
 
 #[test]
-fn test_yaml_with_dependencies() {
-    // Test YAML parsing with task dependencies
-    let yaml = r#"
-id: pipeline
-name: Data Pipeline
-tasks:
-  - id: extract
-    type: command
-    command: python
-    args: ["extract.py"]
-  - id: transform
-    type: command
-    command: python
-    args: ["transform.py"]
-    depends_on: [extract]
-  - id: load
-    type: command
-    command: python
-    args: ["load.py"]
-    depends_on: [transform]
+fn test_toml_with_dependencies() {
+    // Test TOML parsing with task dependencies
+    let toml = r#"
+id = "pipeline"
+name = "Data Pipeline"
+
+[[tasks]]
+id = "extract"
+type = "command"
+command = "python"
+args = ["extract.py"]
+
+[[tasks]]
+id = "transform"
+type = "command"
+command = "python"
+args = ["transform.py"]
+depends_on = ["extract"]
+
+[[tasks]]
+id = "load"
+type = "command"
+command = "python"
+args = ["load.py"]
+depends_on = ["transform"]
 "#;
 
-    let job_config = YamlLoader::parse_job_config(yaml).expect("Should parse YAML");
+    let job_config = TomlLoader::parse_job_config(toml).expect("Should parse TOML");
 
     assert_eq!(job_config.tasks.len(), 3);
     assert_eq!(job_config.tasks[0].depends_on.len(), 0);
@@ -693,22 +706,24 @@ tasks:
 }
 
 #[test]
-fn test_yaml_with_retry_config() {
-    // Test YAML parsing with retry configuration
-    let yaml = r#"
-id: retry_job
-name: Retry Job
-tasks:
-  - id: flaky_task
-    type: command
-    command: ./flaky.sh
-    retry:
-      max_attempts: 5
-      delay_secs: 30
-      condition: always
+fn test_toml_with_retry_config() {
+    // Test TOML parsing with retry configuration
+    let toml = r#"
+id = "retry_job"
+name = "Retry Job"
+
+[[tasks]]
+id = "flaky_task"
+type = "command"
+command = "./flaky.sh"
+
+[tasks.retry]
+max_attempts = 5
+delay_secs = 30
+condition = "always"
 "#;
 
-    let job_config = YamlLoader::parse_job_config(yaml).expect("Should parse YAML");
+    let job_config = TomlLoader::parse_job_config(toml).expect("Should parse TOML");
 
     let retry = job_config.tasks[0].retry.as_ref().unwrap();
     assert_eq!(retry.max_attempts, 5);

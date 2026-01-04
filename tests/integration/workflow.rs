@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use petit::{
     DagBuilder, DagExecutor, Event, EventBus, EventHandler, InMemoryStorage, Job, JobDependency,
     RunStatus, Schedule, Scheduler, Task, TaskCondition, TaskContext, TaskError, TaskId,
-    YamlLoader,
+    TomlLoader,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -160,35 +160,35 @@ async fn test_complete_workflow_define_and_execute() {
     let _ = task.await;
 }
 
-/// Test: Parse job from YAML and execute.
+/// Test: Parse job from TOML and execute.
 #[tokio::test]
-async fn test_workflow_from_yaml_config() {
-    let yaml = r#"
-id: yaml_job
-name: YAML Defined Job
-description: A job defined in YAML
-tasks:
-  - id: step1
-    name: First Step
-    type: command
-    command: echo
-    args:
-      - "step 1"
-  - id: step2
-    name: Second Step
-    depends_on:
-      - step1
-    type: command
-    command: echo
-    args:
-      - "step 2"
+async fn test_workflow_from_toml_config() {
+    let toml = r#"
+id = "toml_job"
+name = "TOML Defined Job"
+description = "A job defined in TOML"
+
+[[tasks]]
+id = "step1"
+name = "First Step"
+type = "command"
+command = "echo"
+args = ["step 1"]
+
+[[tasks]]
+id = "step2"
+name = "Second Step"
+depends_on = ["step1"]
+type = "command"
+command = "echo"
+args = ["step 2"]
 "#;
 
-    // Parse the YAML config
-    let config = YamlLoader::parse_job_config(yaml).unwrap();
+    // Parse the TOML config
+    let config = TomlLoader::parse_job_config(toml).unwrap();
 
-    assert_eq!(config.id, "yaml_job");
-    assert_eq!(config.name, "YAML Defined Job");
+    assert_eq!(config.id, "toml_job");
+    assert_eq!(config.name, "TOML Defined Job");
     assert_eq!(config.tasks.len(), 2);
     assert_eq!(config.tasks[0].id, "step1");
     assert_eq!(config.tasks[1].id, "step2");

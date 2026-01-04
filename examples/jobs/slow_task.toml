@@ -1,0 +1,11 @@
+# Slow task that runs every minute but takes 45 seconds to complete
+# Useful for testing overlap behavior and long-running tasks
+id = "slow_task"
+name = "Slow Task"
+schedule = "* * * * *"  # Every minute
+
+[[tasks]]
+id = "slow"
+type = "command"
+command = "sleep"
+args = ["45"]

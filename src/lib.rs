@@ -37,7 +37,7 @@ pub use storage::SqliteStorage;
 
 pub use config::{
     ConfigError, GlobalConfig, JobConfig, JobConfigBuilder, RetryConfig, ScheduleConfig,
-    TaskConfig, YamlLoader, load_jobs_from_directory,
+    TaskConfig, TomlLoader, load_jobs_from_directory,
 };
 
 pub use scheduler::{Scheduler, SchedulerError, SchedulerHandle, SchedulerState};

@@ -1,0 +1,23 @@
+# System monitoring job that runs every minute
+id = "system_monitor"
+name = "System Monitor"
+schedule = "@every 1m"
+
+[[tasks]]
+id = "check_load"
+type = "command"
+command = "uptime"
+args = []
+
+[[tasks]]
+id = "check_memory"
+type = "command"
+command = "free"
+args = ["-h"]
+
+[[tasks]]
+id = "report"
+type = "command"
+command = "echo"
+args = ["System check completed"]
+depends_on = ["check_load", "check_memory"]

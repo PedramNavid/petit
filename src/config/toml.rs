@@ -1,6 +1,6 @@
-//! YAML configuration parsing.
+//! TOML configuration parsing.
 //!
-//! Parses job definitions and global configuration from YAML files.
+//! Parses job definitions and global configuration from TOML files.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -10,20 +10,20 @@ use std::time::Duration;
 pub use super::error::ConfigError;
 pub use super::types::{GlobalConfig, JobConfig, RetryConfig};
 
-/// YAML configuration loader.
+/// TOML configuration loader.
 ///
-/// Provides methods to load and parse configuration from YAML files or strings.
-pub struct YamlLoader;
+/// Provides methods to load and parse configuration from TOML files or strings.
+pub struct TomlLoader;
 
-impl YamlLoader {
+impl TomlLoader {
     /// Load global configuration from a file.
     ///
     /// # Examples
     ///
     /// ```no_run
-    /// use petit::config::YamlLoader;
+    /// use petit::config::TomlLoader;
     ///
-    /// let config = YamlLoader::load_global_config("petit.yaml")?;
+    /// let config = TomlLoader::load_global_config("petit.toml")?;
     /// println!("Max concurrent jobs: {:?}", config.max_concurrent_jobs);
     /// # Ok::<(), petit::config::ConfigError>(())
     /// ```
@@ -35,7 +35,7 @@ impl YamlLoader {
                 source,
             })?;
         Self::parse_global_config(&content).map_err(|e| match e {
-            ConfigError::YamlError(source) => ConfigError::YamlFileError {
+            ConfigError::TomlError(source) => ConfigError::TomlFileError {
                 path: path.to_path_buf(),
                 source,
             },
@@ -48,25 +48,25 @@ impl YamlLoader {
         })
     }
 
-    /// Parse global configuration from a YAML string.
+    /// Parse global configuration from a TOML string.
     ///
     /// # Examples
     ///
     /// ```
-    /// use petit::config::YamlLoader;
+    /// use petit::config::TomlLoader;
     ///
-    /// let yaml = r#"
-    /// default_timezone: UTC
-    /// max_concurrent_jobs: 5
+    /// let toml = r#"
+    /// default_timezone = "UTC"
+    /// max_concurrent_jobs = 5
     /// "#;
     ///
-    /// let config = YamlLoader::parse_global_config(yaml)?;
+    /// let config = TomlLoader::parse_global_config(toml)?;
     /// assert_eq!(config.default_timezone, Some("UTC".to_string()));
     /// assert_eq!(config.max_concurrent_jobs, Some(5));
     /// # Ok::<(), petit::config::ConfigError>(())
     /// ```
-    pub fn parse_global_config(yaml: &str) -> Result<GlobalConfig, ConfigError> {
-        let config: GlobalConfig = serde_yaml::from_str(yaml).map_err(ConfigError::YamlError)?;
+    pub fn parse_global_config(toml: &str) -> Result<GlobalConfig, ConfigError> {
+        let config: GlobalConfig = toml::from_str(toml).map_err(ConfigError::TomlError)?;
         Ok(config)
     }
 
@@ -75,9 +75,9 @@ impl YamlLoader {
     /// # Examples
     ///
     /// ```no_run
-    /// use petit::config::YamlLoader;
+    /// use petit::config::TomlLoader;
     ///
-    /// let config = YamlLoader::load_job_config("jobs/my_job.yaml")?;
+    /// let config = TomlLoader::load_job_config("jobs/my_job.toml")?;
     /// println!("Job: {} ({})", config.name, config.id);
     /// println!("Tasks: {}", config.tasks.len());
     /// # Ok::<(), petit::config::ConfigError>(())
@@ -90,7 +90,7 @@ impl YamlLoader {
                 source,
             })?;
         Self::parse_job_config(&content).map_err(|e| match e {
-            ConfigError::YamlError(source) => ConfigError::YamlFileError {
+            ConfigError::TomlError(source) => ConfigError::TomlFileError {
                 path: path.to_path_buf(),
                 source,
             },
@@ -104,33 +104,34 @@ impl YamlLoader {
         })
     }
 
-    /// Parse a job configuration from a YAML string.
+    /// Parse a job configuration from a TOML string.
     ///
     /// The configuration is validated to ensure it is well-formed.
     ///
     /// # Examples
     ///
     /// ```
-    /// use petit::config::YamlLoader;
+    /// use petit::config::TomlLoader;
     ///
-    /// let yaml = r#"
-    /// id: example
-    /// name: Example Job
-    /// schedule: "@daily"
-    /// tasks:
-    ///   - id: task1
-    ///     type: command
-    ///     command: echo
-    ///     args: [hello]
+    /// let toml = r#"
+    /// id = "example"
+    /// name = "Example Job"
+    /// schedule = "@daily"
+    ///
+    /// [[tasks]]
+    /// id = "task1"
+    /// type = "command"
+    /// command = "echo"
+    /// args = ["hello"]
     /// "#;
     ///
-    /// let config = YamlLoader::parse_job_config(yaml)?;
+    /// let config = TomlLoader::parse_job_config(toml)?;
     /// assert_eq!(config.id, "example");
     /// assert_eq!(config.tasks.len(), 1);
     /// # Ok::<(), petit::config::ConfigError>(())
     /// ```
-    pub fn parse_job_config(yaml: &str) -> Result<JobConfig, ConfigError> {
-        let config: JobConfig = serde_yaml::from_str(yaml).map_err(ConfigError::YamlError)?;
+    pub fn parse_job_config(toml: &str) -> Result<JobConfig, ConfigError> {
+        let config: JobConfig = toml::from_str(toml).map_err(ConfigError::TomlError)?;
         Self::validate_job_config(&config)?;
         Ok(config)
     }
@@ -299,17 +300,18 @@ mod tests {
     };
 
     #[test]
-    fn test_parse_minimal_job_yaml() {
-        let yaml = r#"
-id: minimal_job
-name: Minimal Job
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    args: ["hello"]
+    fn test_parse_minimal_job_toml() {
+        let toml = r#"
+id = "minimal_job"
+name = "Minimal Job"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+args = ["hello"]
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         assert_eq!(config.id, "minimal_job");
         assert_eq!(config.name, "Minimal Job");
         assert_eq!(config.tasks.len(), 1);
@@ -318,41 +320,49 @@ tasks:
 
     #[test]
     fn test_parse_job_with_all_fields() {
-        let yaml = r#"
-id: full_job
-name: Full Job
-description: A job with all fields specified
-schedule:
-  cron: "0 9 * * *"
-  timezone: America/New_York
-tasks:
-  - id: extract
-    name: Extract Data
-    type: command
-    command: ./extract.sh
-    environment:
-      DB_HOST: localhost
-    retry:
-      max_attempts: 3
-      delay_secs: 60
-  - id: transform
-    type: command
-    command: ./transform.sh
-    depends_on: [extract]
-    condition: all_success
-  - id: load
-    type: command
-    command: ./load.sh
-    depends_on: [transform]
-depends_on:
-  - upstream_job
-config:
-  batch_size: 1000
-  debug: true
-max_concurrency: 1
-enabled: true
+        let toml = r#"
+id = "full_job"
+name = "Full Job"
+description = "A job with all fields specified"
+max_concurrency = 1
+enabled = true
+depends_on = ["upstream_job"]
+
+[schedule]
+cron = "0 9 * * *"
+timezone = "America/New_York"
+
+[config]
+batch_size = 1000
+debug = true
+
+[[tasks]]
+id = "extract"
+name = "Extract Data"
+type = "command"
+command = "./extract.sh"
+
+[tasks.environment]
+DB_HOST = "localhost"
+
+[tasks.retry]
+max_attempts = 3
+delay_secs = 60
+
+[[tasks]]
+id = "transform"
+type = "command"
+command = "./transform.sh"
+depends_on = ["extract"]
+condition = "all_success"
+
+[[tasks]]
+id = "load"
+type = "command"
+command = "./load.sh"
+depends_on = ["transform"]
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         assert_eq!(config.id, "full_job");
         assert_eq!(
             config.description,
@@ -366,18 +376,19 @@ enabled: true
 
     #[test]
     fn test_parse_task_with_command_type() {
-        let yaml = r#"
-id: cmd_job
-name: Command Job
-tasks:
-  - id: run_script
-    type: command
-    command: /usr/bin/python
-    args: ["-c", "print('hello')"]
-    working_dir: /tmp
-    timeout_secs: 300
+        let toml = r#"
+id = "cmd_job"
+name = "Command Job"
+
+[[tasks]]
+id = "run_script"
+type = "command"
+command = "/usr/bin/python"
+args = ["-c", "print('hello')"]
+working_dir = "/tmp"
+timeout_secs = 300
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let task = &config.tasks[0];
 
         match &task.task_type {
@@ -398,26 +409,31 @@ tasks:
 
     #[test]
     fn test_parse_task_dependencies() {
-        let yaml = r#"
-id: dep_job
-name: Dependency Job
-tasks:
-  - id: first
-    type: command
-    command: echo
-    args: ["first"]
-  - id: second
-    type: command
-    command: echo
-    args: ["second"]
-    depends_on: [first]
-  - id: third
-    type: command
-    command: echo
-    args: ["third"]
-    depends_on: [first, second]
+        let toml = r#"
+id = "dep_job"
+name = "Dependency Job"
+
+[[tasks]]
+id = "first"
+type = "command"
+command = "echo"
+args = ["first"]
+
+[[tasks]]
+id = "second"
+type = "command"
+command = "echo"
+args = ["second"]
+depends_on = ["first"]
+
+[[tasks]]
+id = "third"
+type = "command"
+command = "echo"
+args = ["third"]
+depends_on = ["first", "second"]
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         assert_eq!(config.tasks[0].depends_on.len(), 0);
         assert_eq!(config.tasks[1].depends_on, vec!["first"]);
         assert_eq!(config.tasks[2].depends_on, vec!["first", "second"]);
@@ -425,19 +441,21 @@ tasks:
 
     #[test]
     fn test_parse_retry_policy() {
-        let yaml = r#"
-id: retry_job
-name: Retry Job
-tasks:
-  - id: flaky_task
-    type: command
-    command: ./flaky.sh
-    retry:
-      max_attempts: 5
-      delay_secs: 30
-      condition: transient_only
+        let toml = r#"
+id = "retry_job"
+name = "Retry Job"
+
+[[tasks]]
+id = "flaky_task"
+type = "command"
+command = "./flaky.sh"
+
+[tasks.retry]
+max_attempts = 5
+delay_secs = 30
+condition = "transient_only"
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let retry = config.tasks[0].retry.as_ref().unwrap();
         assert_eq!(retry.max_attempts, 5);
         assert_eq!(retry.delay_secs, 30);
@@ -449,19 +467,21 @@ tasks:
 
     #[test]
     fn test_parse_schedule_with_timezone() {
-        let yaml = r#"
-id: scheduled_job
-name: Scheduled Job
-schedule:
-  cron: "0 9 * * 1-5"
-  timezone: Europe/London
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    args: ["scheduled"]
+        let toml = r#"
+id = "scheduled_job"
+name = "Scheduled Job"
+
+[schedule]
+cron = "0 9 * * 1-5"
+timezone = "Europe/London"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+args = ["scheduled"]
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let schedule = config.schedule.unwrap();
         assert_eq!(schedule.cron(), "0 9 * * 1-5");
         assert_eq!(schedule.timezone(), Some("Europe/London"));
@@ -469,17 +489,18 @@ tasks:
 
     #[test]
     fn test_parse_simple_schedule() {
-        let yaml = r#"
-id: simple_schedule_job
-name: Simple Schedule Job
-schedule: "@daily"
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    args: ["daily"]
+        let toml = r#"
+id = "simple_schedule_job"
+name = "Simple Schedule Job"
+schedule = "@daily"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+args = ["daily"]
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let schedule = config.schedule.unwrap();
         assert_eq!(schedule.cron(), "@daily");
         assert_eq!(schedule.timezone(), None);
@@ -487,30 +508,66 @@ tasks:
 
     #[test]
     fn test_parse_cross_job_dependencies() {
-        let yaml = r#"
-id: downstream_job
-name: Downstream Job
-depends_on:
-  - upstream_job_1
-  - job: upstream_job_2
-    condition: last_complete
-  - job: upstream_job_3
-    condition:
-      within_window:
-        seconds: 3600
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    args: ["downstream"]
+        let toml = r#"
+id = "downstream_job"
+name = "Downstream Job"
+
+# Simple string dependency (using array syntax)
+depends_on = ["upstream_job_1"]
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+args = ["downstream"]
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
-        assert_eq!(config.depends_on.len(), 3);
+        let config = TomlLoader::parse_job_config(toml).unwrap();
+        assert_eq!(config.depends_on.len(), 1);
 
-        // Simple dependency
+        // First dependency - simple string
         assert_eq!(config.depends_on[0].job_id(), "upstream_job_1");
+        assert!(matches!(
+            config.depends_on[0],
+            JobDependencyConfig::Simple(_)
+        ));
+    }
 
-        // Detailed dependency with last_complete
+    #[test]
+    fn test_parse_cross_job_dependencies_detailed() {
+        let toml = r#"
+id = "downstream_job"
+name = "Downstream Job"
+
+[[depends_on]]
+job = "upstream_job_1"
+condition = "last_success"
+
+[[depends_on]]
+job = "upstream_job_2"
+condition = "last_complete"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+args = ["downstream"]
+"#;
+        let config = TomlLoader::parse_job_config(toml).unwrap();
+        assert_eq!(config.depends_on.len(), 2);
+
+        // First dependency with last_success
+        match &config.depends_on[0] {
+            JobDependencyConfig::Detailed { job, condition } => {
+                assert_eq!(job, "upstream_job_1");
+                assert!(matches!(
+                    condition,
+                    JobDependencyConditionConfig::LastSuccess
+                ));
+            }
+            _ => panic!("Expected detailed dependency"),
+        }
+
+        // Second dependency with last_complete
         match &config.depends_on[1] {
             JobDependencyConfig::Detailed { condition, .. } => {
                 assert!(matches!(
@@ -520,9 +577,31 @@ tasks:
             }
             _ => panic!("Expected detailed dependency"),
         }
+    }
 
-        // Detailed dependency with within_window
-        match &config.depends_on[2] {
+    #[test]
+    fn test_parse_cross_job_dependencies_within_window() {
+        let toml = r#"
+id = "downstream_job"
+name = "Downstream Job"
+
+[[depends_on]]
+job = "upstream_job_1"
+
+[depends_on.condition.within_window]
+seconds = 3600
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+args = ["downstream"]
+"#;
+        let config = TomlLoader::parse_job_config(toml).unwrap();
+        assert_eq!(config.depends_on.len(), 1);
+
+        // Dependency with within_window
+        match &config.depends_on[0] {
             JobDependencyConfig::Detailed { condition, .. } => match condition {
                 JobDependencyConditionConfig::WithinWindow { seconds } => {
                     assert_eq!(*seconds, 3600);
@@ -535,26 +614,27 @@ tasks:
 
     #[test]
     fn test_validation_error_missing_id() {
-        let yaml = r#"
-id: ""
-name: No ID Job
-tasks:
-  - id: task1
-    type: command
-    command: echo
+        let toml = r#"
+id = ""
+name = "No ID Job"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::MissingField(_))));
     }
 
     #[test]
     fn test_validation_error_no_tasks() {
-        let yaml = r#"
-id: no_tasks_job
-name: No Tasks Job
-tasks: []
+        let toml = r#"
+id = "no_tasks_job"
+name = "No Tasks Job"
+tasks = []
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(
@@ -572,18 +652,21 @@ tasks: []
 
     #[test]
     fn test_validation_error_duplicate_task_id() {
-        let yaml = r#"
-id: dup_task_job
-name: Duplicate Task Job
-tasks:
-  - id: task1
-    type: command
-    command: echo
-  - id: task1
-    type: command
-    command: echo
+        let toml = r#"
+id = "dup_task_job"
+name = "Duplicate Task Job"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(
@@ -606,16 +689,17 @@ tasks:
 
     #[test]
     fn test_validation_error_invalid_dependency() {
-        let yaml = r#"
-id: invalid_dep_job
-name: Invalid Dependency Job
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    depends_on: [nonexistent]
+        let toml = r#"
+id = "invalid_dep_job"
+name = "Invalid Dependency Job"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+depends_on = ["nonexistent"]
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(
@@ -643,16 +727,17 @@ tasks:
 
     #[test]
     fn test_validation_error_zero_max_concurrency() {
-        let yaml = r#"
-id: zero_concurrency_job
-name: Zero Concurrency Job
-max_concurrency: 0
-tasks:
-  - id: task1
-    type: command
-    command: echo
+        let toml = r#"
+id = "zero_concurrency_job"
+name = "Zero Concurrency Job"
+max_concurrency = 0
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(
@@ -670,20 +755,23 @@ tasks:
 
     #[test]
     fn test_parse_global_config() {
-        let yaml = r#"
-default_timezone: UTC
-default_retry:
-  max_attempts: 3
-  delay_secs: 60
-max_concurrent_jobs: 10
-max_concurrent_tasks: 5
-storage:
-  type: sqlite
-  path: /var/lib/petit/petit.db
-environment:
-  LOG_LEVEL: info
+        let toml = r#"
+default_timezone = "UTC"
+max_concurrent_jobs = 10
+max_concurrent_tasks = 5
+
+[default_retry]
+max_attempts = 3
+delay_secs = 60
+
+[storage]
+type = "sqlite"
+path = "/var/lib/petit/petit.db"
+
+[environment]
+LOG_LEVEL = "info"
 "#;
-        let config = YamlLoader::parse_global_config(yaml).unwrap();
+        let config = TomlLoader::parse_global_config(toml).unwrap();
         assert_eq!(config.default_timezone, Some("UTC".to_string()));
         assert_eq!(config.max_concurrent_jobs, Some(10));
         assert_eq!(config.max_concurrent_tasks, Some(5));
@@ -698,24 +786,25 @@ environment:
 
     #[test]
     fn test_parse_empty_global_config() {
-        let yaml = "{}";
-        let config = YamlLoader::parse_global_config(yaml).unwrap();
+        let toml = "";
+        let config = TomlLoader::parse_global_config(toml).unwrap();
         assert!(config.default_timezone.is_none());
         assert!(config.default_retry.is_none());
     }
 
     #[test]
     fn test_parse_python_task() {
-        let yaml = r#"
-id: python_job
-name: Python Job
-tasks:
-  - id: run_python
-    type: python
-    script: print("hello from python")
-    inline: true
+        let toml = r#"
+id = "python_job"
+name = "Python Job"
+
+[[tasks]]
+id = "run_python"
+type = "python"
+script = "print(\"hello from python\")"
+inline = true
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         match &config.tasks[0].task_type {
             TaskTypeConfig::Python { script, inline } => {
                 assert_eq!(script, "print(\"hello from python\")");
@@ -727,25 +816,30 @@ tasks:
 
     #[test]
     fn test_parse_task_conditions() {
-        let yaml = r#"
-id: condition_job
-name: Condition Job
-tasks:
-  - id: main_task
-    type: command
-    command: ./main.sh
-  - id: cleanup
-    type: command
-    command: ./cleanup.sh
-    depends_on: [main_task]
-    condition: all_done
-  - id: on_error
-    type: command
-    command: ./notify_error.sh
-    depends_on: [main_task]
-    condition: on_failure
+        let toml = r#"
+id = "condition_job"
+name = "Condition Job"
+
+[[tasks]]
+id = "main_task"
+type = "command"
+command = "./main.sh"
+
+[[tasks]]
+id = "cleanup"
+type = "command"
+command = "./cleanup.sh"
+depends_on = ["main_task"]
+condition = "all_done"
+
+[[tasks]]
+id = "on_error"
+type = "command"
+command = "./notify_error.sh"
+depends_on = ["main_task"]
+condition = "on_failure"
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         assert!(config.tasks[0].condition.is_none());
         assert!(matches!(
             config.tasks[1].condition,
@@ -759,19 +853,21 @@ tasks:
 
     #[test]
     fn test_parse_task_environment() {
-        let yaml = r#"
-id: env_job
-name: Environment Job
-tasks:
-  - id: task_with_env
-    type: command
-    command: ./run.sh
-    environment:
-      DATABASE_URL: postgres://localhost/db
-      API_KEY: secret123
-      DEBUG: "true"
+        let toml = r#"
+id = "env_job"
+name = "Environment Job"
+
+[[tasks]]
+id = "task_with_env"
+type = "command"
+command = "./run.sh"
+
+[tasks.environment]
+DATABASE_URL = "postgres://localhost/db"
+API_KEY = "secret123"
+DEBUG = "true"
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         let env = &config.tasks[0].environment;
         assert_eq!(
             env.get("DATABASE_URL"),
@@ -783,18 +879,20 @@ tasks:
 
     #[test]
     fn test_parse_custom_task_type() {
-        let yaml = r#"
-id: custom_job
-name: Custom Job
-tasks:
-  - id: custom_task
-    type: custom
-    handler: my_custom_handler
-    config:
-      param1: value1
-      param2: 42
+        let toml = r#"
+id = "custom_job"
+name = "Custom Job"
+
+[[tasks]]
+id = "custom_task"
+type = "custom"
+handler = "my_custom_handler"
+
+[tasks.config]
+param1 = "value1"
+param2 = 42
 "#;
-        let config = YamlLoader::parse_job_config(yaml).unwrap();
+        let config = TomlLoader::parse_job_config(toml).unwrap();
         match &config.tasks[0].task_type {
             TaskTypeConfig::Custom { handler, config } => {
                 assert_eq!(handler, "my_custom_handler");
@@ -807,16 +905,17 @@ tasks:
 
     #[test]
     fn test_validation_error_invalid_cron_expression() {
-        let yaml = r#"
-id: invalid_cron_job
-name: Invalid Cron Job
-schedule: "foo bar baz"
-tasks:
-  - id: task1
-    type: command
-    command: echo
+        let toml = r#"
+id = "invalid_cron_job"
+name = "Invalid Cron Job"
+schedule = "foo bar baz"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(msg.contains("invalid schedule"));
@@ -825,18 +924,20 @@ tasks:
 
     #[test]
     fn test_validation_error_invalid_timezone() {
-        let yaml = r#"
-id: invalid_tz_job
-name: Invalid Timezone Job
-schedule:
-  cron: "0 9 * * *"
-  timezone: "Invalid/Timezone"
-tasks:
-  - id: task1
-    type: command
-    command: echo
+        let toml = r#"
+id = "invalid_tz_job"
+name = "Invalid Timezone Job"
+
+[schedule]
+cron = "0 9 * * *"
+timezone = "Invalid/Timezone"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(msg.contains("invalid schedule"));
@@ -846,16 +947,17 @@ tasks:
 
     #[test]
     fn test_validation_error_invalid_shortcut() {
-        let yaml = r#"
-id: invalid_shortcut_job
-name: Invalid Shortcut Job
-schedule: "@invalid"
-tasks:
-  - id: task1
-    type: command
-    command: echo
+        let toml = r#"
+id = "invalid_shortcut_job"
+name = "Invalid Shortcut Job"
+schedule = "@invalid"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(msg.contains("invalid schedule"));
@@ -864,78 +966,84 @@ tasks:
 
     #[test]
     fn test_validation_success_valid_cron() {
-        let yaml = r#"
-id: valid_cron_job
-name: Valid Cron Job
-schedule: "0 9 * * *"
-tasks:
-  - id: task1
-    type: command
-    command: echo
+        let toml = r#"
+id = "valid_cron_job"
+name = "Valid Cron Job"
+schedule = "0 9 * * *"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validation_success_valid_cron_with_timezone() {
-        let yaml = r#"
-id: valid_cron_tz_job
-name: Valid Cron with Timezone Job
-schedule:
-  cron: "0 9 * * *"
-  timezone: "America/New_York"
-tasks:
-  - id: task1
-    type: command
-    command: echo
+        let toml = r#"
+id = "valid_cron_tz_job"
+name = "Valid Cron with Timezone Job"
+
+[schedule]
+cron = "0 9 * * *"
+timezone = "America/New_York"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validation_success_valid_shortcut() {
-        let yaml = r#"
-id: valid_shortcut_job
-name: Valid Shortcut Job
-schedule: "@daily"
-tasks:
-  - id: task1
-    type: command
-    command: echo
+        let toml = r#"
+id = "valid_shortcut_job"
+name = "Valid Shortcut Job"
+schedule = "@daily"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validation_success_valid_interval() {
-        let yaml = r#"
-id: valid_interval_job
-name: Valid Interval Job
-schedule: "@every 5m"
-tasks:
-  - id: task1
-    type: command
-    command: echo
+        let toml = r#"
+id = "valid_interval_job"
+name = "Valid Interval Job"
+schedule = "@every 5m"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validation_error_self_dependency() {
-        let yaml = r#"
-id: self_dep_job
-name: Self Dependency Job
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    depends_on: [task1]
+        let toml = r#"
+id = "self_dep_job"
+name = "Self Dependency Job"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+depends_on = ["task1"]
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(msg.contains("cannot depend on itself"));
@@ -945,8 +1053,8 @@ tasks:
 
     #[test]
     fn test_file_read_error_includes_path() {
-        let nonexistent_path = "/nonexistent/path/to/job.yaml";
-        let result = YamlLoader::load_job_config(nonexistent_path);
+        let nonexistent_path = "/nonexistent/path/to/job.toml";
+        let result = TomlLoader::load_job_config(nonexistent_path);
 
         match result {
             Err(ConfigError::FileReadError { path, source }) => {
@@ -959,19 +1067,22 @@ tasks:
 
     #[test]
     fn test_validation_error_duplicate_dependency() {
-        let yaml = r#"
-id: dup_dep_job
-name: Duplicate Dependency Job
-tasks:
-  - id: task1
-    type: command
-    command: echo
-  - id: task2
-    type: command
-    command: echo
-    depends_on: [task1, task1]
+        let toml = r#"
+id = "dup_dep_job"
+name = "Duplicate Dependency Job"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+
+[[tasks]]
+id = "task2"
+type = "command"
+command = "echo"
+depends_on = ["task1", "task1"]
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(msg.contains("duplicate dependency"));
@@ -980,45 +1091,48 @@ tasks:
     }
 
     #[test]
-    fn test_yaml_file_error_includes_path() {
+    fn test_toml_file_error_includes_path() {
         use std::io::Write;
         let temp_dir = std::env::temp_dir();
-        let test_file = temp_dir.join("test_invalid_yaml.yaml");
+        let test_file = temp_dir.join("test_invalid_toml.toml");
 
-        // Write invalid YAML to a temporary file
+        // Write invalid TOML to a temporary file
         let mut file = std::fs::File::create(&test_file).unwrap();
-        writeln!(file, "{{invalid yaml: [unclosed").unwrap();
+        writeln!(file, "{{invalid toml: [unclosed").unwrap();
         drop(file);
 
-        let result = YamlLoader::load_job_config(&test_file);
+        let result = TomlLoader::load_job_config(&test_file);
 
         // Clean up
         let _ = std::fs::remove_file(&test_file);
 
         match result {
-            Err(ConfigError::YamlFileError { path, source: _ }) => {
+            Err(ConfigError::TomlFileError { path, source: _ }) => {
                 assert_eq!(path, test_file);
             }
-            other => panic!("Expected YamlFileError, got: {:?}", other),
+            other => panic!("Expected TomlFileError, got: {:?}", other),
         }
     }
 
     #[test]
     fn test_validation_error_simple_cycle() {
-        let yaml = r#"
-id: cycle_job
-name: Cycle Job
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    depends_on: [task2]
-  - id: task2
-    type: command
-    command: echo
-    depends_on: [task1]
+        let toml = r#"
+id = "cycle_job"
+name = "Cycle Job"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+depends_on = ["task2"]
+
+[[tasks]]
+id = "task2"
+type = "command"
+command = "echo"
+depends_on = ["task1"]
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(msg.contains("cycle detected"));
@@ -1027,8 +1141,8 @@ tasks:
 
     #[test]
     fn test_global_config_file_read_error_includes_path() {
-        let nonexistent_path = "/nonexistent/global/config.yaml";
-        let result = YamlLoader::load_global_config(nonexistent_path);
+        let nonexistent_path = "/nonexistent/global/config.toml";
+        let result = TomlLoader::load_global_config(nonexistent_path);
 
         match result {
             Err(ConfigError::FileReadError { path, source }) => {
@@ -1041,59 +1155,75 @@ tasks:
 
     #[test]
     fn test_validation_error_complex_cycle() {
-        let yaml = r#"
-id: complex_cycle_job
-name: Complex Cycle Job
-tasks:
-  - id: task1
-    type: command
-    command: echo
-  - id: task2
-    type: command
-    command: echo
-    depends_on: [task1]
-  - id: task3
-    type: command
-    command: echo
-    depends_on: [task2]
-  - id: task4
-    type: command
-    command: echo
-    depends_on: [task3, task1]
-  - id: task5
-    type: command
-    command: echo
-    depends_on: [task4]
-  - id: task6
-    type: command
-    command: echo
-    depends_on: [task5, task2]
+        let toml = r#"
+id = "complex_cycle_job"
+name = "Complex Cycle Job"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+
+[[tasks]]
+id = "task2"
+type = "command"
+command = "echo"
+depends_on = ["task1"]
+
+[[tasks]]
+id = "task3"
+type = "command"
+command = "echo"
+depends_on = ["task2"]
+
+[[tasks]]
+id = "task4"
+type = "command"
+command = "echo"
+depends_on = ["task3", "task1"]
+
+[[tasks]]
+id = "task5"
+type = "command"
+command = "echo"
+depends_on = ["task4"]
+
+[[tasks]]
+id = "task6"
+type = "command"
+command = "echo"
+depends_on = ["task5", "task2"]
 "#;
         // This should pass - it's a valid DAG
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validation_error_three_way_cycle() {
-        let yaml = r#"
-id: three_way_cycle_job
-name: Three Way Cycle Job
-tasks:
-  - id: task1
-    type: command
-    command: echo
-    depends_on: [task3]
-  - id: task2
-    type: command
-    command: echo
-    depends_on: [task1]
-  - id: task3
-    type: command
-    command: echo
-    depends_on: [task2]
+        let toml = r#"
+id = "three_way_cycle_job"
+name = "Three Way Cycle Job"
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
+depends_on = ["task3"]
+
+[[tasks]]
+id = "task2"
+type = "command"
+command = "echo"
+depends_on = ["task1"]
+
+[[tasks]]
+id = "task3"
+type = "command"
+command = "echo"
+depends_on = ["task2"]
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
             assert!(msg.contains("cycle detected"));
@@ -1104,34 +1234,45 @@ tasks:
 
     #[test]
     fn test_validation_valid_complex_dag() {
-        let yaml = r#"
-id: complex_dag_job
-name: Complex DAG Job
-tasks:
-  - id: extract1
-    type: command
-    command: ./extract1.sh
-  - id: extract2
-    type: command
-    command: ./extract2.sh
-  - id: transform1
-    type: command
-    command: ./transform1.sh
-    depends_on: [extract1]
-  - id: transform2
-    type: command
-    command: ./transform2.sh
-    depends_on: [extract2]
-  - id: merge
-    type: command
-    command: ./merge.sh
-    depends_on: [transform1, transform2]
-  - id: load
-    type: command
-    command: ./load.sh
-    depends_on: [merge]
+        let toml = r#"
+id = "complex_dag_job"
+name = "Complex DAG Job"
+
+[[tasks]]
+id = "extract1"
+type = "command"
+command = "./extract1.sh"
+
+[[tasks]]
+id = "extract2"
+type = "command"
+command = "./extract2.sh"
+
+[[tasks]]
+id = "transform1"
+type = "command"
+command = "./transform1.sh"
+depends_on = ["extract1"]
+
+[[tasks]]
+id = "transform2"
+type = "command"
+command = "./transform2.sh"
+depends_on = ["extract2"]
+
+[[tasks]]
+id = "merge"
+type = "command"
+command = "./merge.sh"
+depends_on = ["transform1", "transform2"]
+
+[[tasks]]
+id = "load"
+type = "command"
+command = "./load.sh"
+depends_on = ["merge"]
 "#;
-        let result = YamlLoader::parse_job_config(yaml);
+        let result = TomlLoader::parse_job_config(toml);
         assert!(result.is_ok());
     }
 
@@ -1139,25 +1280,26 @@ tasks:
     fn test_missing_field_error_includes_file_context() {
         use std::io::Write;
         let temp_dir = std::env::temp_dir();
-        let test_file = temp_dir.join("test_missing_field.yaml");
+        let test_file = temp_dir.join("test_missing_field.toml");
 
         // Write job config with empty name
         let mut file = std::fs::File::create(&test_file).unwrap();
         writeln!(
             file,
             r#"
-id: test_job
-name: ""
-tasks:
-  - id: task1
-    type: command
-    command: echo
+id = "test_job"
+name = ""
+
+[[tasks]]
+id = "task1"
+type = "command"
+command = "echo"
 "#
         )
         .unwrap();
         drop(file);
 
-        let result = YamlLoader::load_job_config(&test_file);
+        let result = TomlLoader::load_job_config(&test_file);
 
         // Clean up
         let _ = std::fs::remove_file(&test_file);

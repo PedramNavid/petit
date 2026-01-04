@@ -28,16 +28,16 @@ pub enum ConfigError {
         source: std::io::Error,
     },
 
-    /// Failed to parse YAML.
-    #[error("YAML parse error: {0}")]
-    YamlError(serde_yaml::Error),
+    /// Failed to parse TOML.
+    #[error("TOML parse error: {0}")]
+    TomlError(toml::de::Error),
 
-    /// Failed to parse YAML from a specific file.
-    #[error("YAML parse error in '{path}': {source}")]
-    YamlFileError {
+    /// Failed to parse TOML from a specific file.
+    #[error("TOML parse error in '{path}': {source}")]
+    TomlFileError {
         path: PathBuf,
         #[source]
-        source: serde_yaml::Error,
+        source: toml::de::Error,
     },
 
     /// Invalid configuration value.

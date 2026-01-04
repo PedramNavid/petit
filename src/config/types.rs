@@ -1,6 +1,6 @@
 //! Configuration type definitions.
 //!
-//! This module contains the type definitions for YAML configuration structures
+//! This module contains the type definitions for TOML configuration structures
 //! including jobs, tasks, schedules, retry policies, and dependencies.
 
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ pub enum StorageConfig {
     },
 }
 
-/// Job configuration from YAML.
+/// Job configuration from TOML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobConfig {
     /// Job identifier.
@@ -58,7 +58,7 @@ pub struct JobConfig {
     pub depends_on: Vec<JobDependencyConfig>,
     /// Job-level configuration values.
     #[serde(default)]
-    pub config: HashMap<String, serde_yaml::Value>,
+    pub config: HashMap<String, toml::Value>,
     /// Maximum concurrent runs of this job.
     pub max_concurrency: Option<usize>,
     /// Whether the job is enabled.
@@ -158,7 +158,7 @@ pub enum TaskTypeConfig {
         handler: String,
         /// Custom configuration.
         #[serde(default)]
-        config: HashMap<String, serde_yaml::Value>,
+        config: HashMap<String, toml::Value>,
     },
 }
 
