@@ -28,6 +28,10 @@ pub enum JobError {
     #[error("missing job dependency: {0}")]
     MissingDependency(String),
 
+    /// Circular dependency detected.
+    #[error("circular dependency detected: {0}")]
+    CircularDependency(String),
+
     /// Invalid schedule.
     #[error("invalid schedule: {0}")]
     InvalidSchedule(String),
@@ -366,6 +370,104 @@ impl JobBuilder {
             enabled: self.enabled,
         })
     }
+}
+
+/// Validate a collection of jobs, including cycle detection.
+///
+/// This function validates each job individually and also checks for
+/// circular dependencies across the entire job graph.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Any job has an invalid DAG
+/// - Any job references a dependency that doesn't exist in the collection
+/// - There are circular dependencies between jobs
+pub fn validate_jobs(jobs: &[Job]) -> Result<(), JobError> {
+    // Build a set of job IDs for lookup
+    let job_ids: HashSet<JobId> = jobs.iter().map(|j| j.id().clone()).collect();
+
+    // Validate each job individually
+    for job in jobs {
+        job.validate(&job_ids)?;
+    }
+
+    // Build adjacency list for cycle detection
+    // An edge from A to B means A depends on B (B must run before A)
+    let job_set: HashSet<&JobId> = jobs.iter().map(|j| j.id()).collect();
+    let mut graph: HashMap<&JobId, Vec<&JobId>> = HashMap::new();
+
+    for job in jobs {
+        let deps: Vec<&JobId> = job
+            .dependencies()
+            .iter()
+            .map(|d| d.job_id())
+            .filter(|id| job_set.contains(id))
+            .collect();
+        graph.insert(job.id(), deps);
+    }
+
+    // DFS-based cycle detection using three-color algorithm
+    // White (not visited), Gray (in current path), Black (fully processed)
+    #[derive(Clone, Copy, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+
+    let mut colors: HashMap<&JobId, Color> = job_set.iter().map(|&id| (id, Color::White)).collect();
+    let mut path: Vec<&JobId> = Vec::new();
+
+    fn dfs<'a>(
+        node: &'a JobId,
+        graph: &HashMap<&'a JobId, Vec<&'a JobId>>,
+        colors: &mut HashMap<&'a JobId, Color>,
+        path: &mut Vec<&'a JobId>,
+    ) -> Option<Vec<String>> {
+        colors.insert(node, Color::Gray);
+        path.push(node);
+
+        if let Some(neighbors) = graph.get(node) {
+            for &neighbor in neighbors {
+                match colors.get(neighbor) {
+                    Some(Color::Gray) => {
+                        // Found a cycle - build the cycle path
+                        let cycle_start = path.iter().position(|&id| id == neighbor).unwrap();
+                        let mut cycle: Vec<String> = path[cycle_start..]
+                            .iter()
+                            .map(|id| id.to_string())
+                            .collect();
+                        cycle.push(neighbor.to_string());
+                        return Some(cycle);
+                    }
+                    Some(Color::White) | None => {
+                        if let Some(cycle) = dfs(neighbor, graph, colors, path) {
+                            return Some(cycle);
+                        }
+                    }
+                    Some(Color::Black) => {
+                        // Already fully processed, no cycle through this node
+                    }
+                }
+            }
+        }
+
+        path.pop();
+        colors.insert(node, Color::Black);
+        None
+    }
+
+    // Run DFS from each unvisited node
+    for &job_id in &job_set {
+        if colors.get(job_id) == Some(&Color::White)
+            && let Some(cycle) = dfs(job_id, &graph, &mut colors, &mut path)
+        {
+            return Err(JobError::CircularDependency(cycle.join(" -> ")));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -714,5 +816,118 @@ mod tests {
 
         let job2 = Job::new("job2", "Job 2", dag).with_max_concurrency(100);
         assert_eq!(job2.max_concurrency(), Some(100));
+    }
+
+    #[test]
+    fn test_circular_dependency_detection() {
+        let dag = create_simple_dag();
+
+        // Create two jobs with circular dependencies: A -> B -> A
+        let job_a = Job::new("job_a", "Job A", dag.clone())
+            .with_dependency(JobDependency::new(JobId::new("job_b")));
+
+        let job_b = Job::new("job_b", "Job B", dag.clone())
+            .with_dependency(JobDependency::new(JobId::new("job_a")));
+
+        // Individual job validation passes (it only checks deps exist)
+        let known_jobs: HashSet<JobId> = vec![JobId::new("job_a"), JobId::new("job_b")]
+            .into_iter()
+            .collect();
+        assert!(job_a.validate(&known_jobs).is_ok());
+        assert!(job_b.validate(&known_jobs).is_ok());
+
+        // But validate_jobs detects the cycle
+        let result = validate_jobs(&[job_a, job_b]);
+        assert!(matches!(result, Err(JobError::CircularDependency(_))));
+
+        if let Err(JobError::CircularDependency(msg)) = result {
+            // The cycle should include both jobs
+            assert!(msg.contains("job_a"));
+            assert!(msg.contains("job_b"));
+        }
+    }
+
+    #[test]
+    fn test_complex_circular_dependency() {
+        let dag = create_simple_dag();
+
+        // Create a more complex circular dependency chain: A -> B -> C -> A
+        let job_a = Job::new("job_a", "Job A", dag.clone())
+            .with_dependency(JobDependency::new(JobId::new("job_b")));
+
+        let job_b = Job::new("job_b", "Job B", dag.clone())
+            .with_dependency(JobDependency::new(JobId::new("job_c")));
+
+        let job_c = Job::new("job_c", "Job C", dag.clone())
+            .with_dependency(JobDependency::new(JobId::new("job_a")));
+
+        // validate_jobs detects the cycle
+        let result = validate_jobs(&[job_a, job_b, job_c]);
+        assert!(matches!(result, Err(JobError::CircularDependency(_))));
+
+        if let Err(JobError::CircularDependency(msg)) = result {
+            // The cycle should include all three jobs
+            assert!(msg.contains("job_a"));
+            assert!(msg.contains("job_b"));
+            assert!(msg.contains("job_c"));
+        }
+    }
+
+    #[test]
+    fn test_self_dependency() {
+        let dag = create_simple_dag();
+
+        // A job that depends on itself
+        let job = Job::new("self_ref", "Self Referencing Job", dag)
+            .with_dependency(JobDependency::new(JobId::new("self_ref")));
+
+        // Self-dependency is caught by Job::validate (not cycle detection)
+        let result = validate_jobs(&[job]);
+        assert!(matches!(result, Err(JobError::InvalidDependency(_))));
+
+        if let Err(JobError::InvalidDependency(msg)) = result {
+            assert!(msg.contains("cannot depend on itself"));
+        }
+    }
+
+    #[test]
+    fn test_valid_dependency_chain() {
+        let dag = create_simple_dag();
+
+        // Create a valid dependency chain: A -> B -> C (no cycle)
+        let job_a = Job::new("job_a", "Job A", dag.clone())
+            .with_dependency(JobDependency::new(JobId::new("job_b")));
+
+        let job_b = Job::new("job_b", "Job B", dag.clone())
+            .with_dependency(JobDependency::new(JobId::new("job_c")));
+
+        let job_c = Job::new("job_c", "Job C", dag.clone());
+
+        // validate_jobs should pass
+        let result = validate_jobs(&[job_a, job_b, job_c]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_diamond_dependency_no_cycle() {
+        let dag = create_simple_dag();
+
+        // Diamond pattern: A depends on B and C, both B and C depend on D
+        // This is NOT a cycle
+        let job_a = Job::new("job_a", "Job A", dag.clone())
+            .with_dependency(JobDependency::new(JobId::new("job_b")))
+            .with_dependency(JobDependency::new(JobId::new("job_c")));
+
+        let job_b = Job::new("job_b", "Job B", dag.clone())
+            .with_dependency(JobDependency::new(JobId::new("job_d")));
+
+        let job_c = Job::new("job_c", "Job C", dag.clone())
+            .with_dependency(JobDependency::new(JobId::new("job_d")));
+
+        let job_d = Job::new("job_d", "Job D", dag.clone());
+
+        // validate_jobs should pass - diamond is not a cycle
+        let result = validate_jobs(&[job_a, job_b, job_c, job_d]);
+        assert!(result.is_ok());
     }
 }
