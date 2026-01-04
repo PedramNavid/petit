@@ -2,10 +2,12 @@
 //!
 //! Tests that verify the full pipeline from job definition to execution.
 
+use crate::common::wait_for_run_status;
 use async_trait::async_trait;
 use petit::{
     DagBuilder, DagExecutor, Event, EventBus, EventHandler, InMemoryStorage, Job, JobDependency,
-    Schedule, Scheduler, Task, TaskCondition, TaskContext, TaskError, TaskId, YamlLoader,
+    RunStatus, Schedule, Scheduler, Task, TaskCondition, TaskContext, TaskError, TaskId,
+    YamlLoader,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -122,16 +124,22 @@ async fn test_complete_workflow_define_and_execute() {
     let handler = RecordingHandler::new();
     event_bus.register(handler.clone()).await;
 
-    let storage = InMemoryStorage::new();
-    let mut scheduler = Scheduler::new(storage).with_event_bus(event_bus);
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut scheduler = Scheduler::with_storage(Arc::clone(&storage)).with_event_bus(event_bus);
     scheduler.register(job);
 
     // 4. Start scheduler and trigger job
     let (handle, task) = scheduler.start().await;
-    let _run_id = handle.trigger("daily_etl").await.unwrap();
+    let run_id = handle.trigger("daily_etl").await.unwrap();
 
     // 5. Wait for execution
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_run_status(
+        storage.as_ref(),
+        &run_id,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // 6. Verify events
     assert_eq!(handler.job_started_count().await, 1);
@@ -275,12 +283,12 @@ async fn test_complex_dag_with_mixed_conditions() {
 /// Test: Cross-job dependency chain.
 #[tokio::test]
 async fn test_cross_job_dependency_chain() {
-    let storage = InMemoryStorage::new();
+    let storage = Arc::new(InMemoryStorage::new());
     let event_bus = EventBus::new();
     let handler = RecordingHandler::new();
     event_bus.register(handler.clone()).await;
 
-    let mut scheduler = Scheduler::new(storage).with_event_bus(event_bus);
+    let mut scheduler = Scheduler::with_storage(Arc::clone(&storage)).with_event_bus(event_bus);
 
     // Job A: No dependencies
     let dag_a = DagBuilder::new("dag_a", "DAG A")
@@ -319,16 +327,34 @@ async fn test_cross_job_dependency_chain() {
     assert!(result.is_err(), "Job B should fail - Job A hasn't run");
 
     // Trigger Job A - should succeed
-    handle.trigger("job_a").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let run_a = handle.trigger("job_a").await.unwrap();
+    wait_for_run_status(
+        storage.as_ref(),
+        &run_a,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Now Job B should work
-    handle.trigger("job_b").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let run_b = handle.trigger("job_b").await.unwrap();
+    wait_for_run_status(
+        storage.as_ref(),
+        &run_b,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Now Job C should work
-    handle.trigger("job_c").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let run_c = handle.trigger("job_c").await.unwrap();
+    wait_for_run_status(
+        storage.as_ref(),
+        &run_c,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // All three jobs should have completed
     assert_eq!(handler.job_completed_count().await, 3);
@@ -464,12 +490,12 @@ async fn test_context_data_flow_through_dag() {
 /// Test: Multiple jobs running concurrently.
 #[tokio::test]
 async fn test_multiple_concurrent_jobs() {
-    let storage = InMemoryStorage::new();
+    let storage = Arc::new(InMemoryStorage::new());
     let event_bus = EventBus::new();
     let handler = RecordingHandler::new();
     event_bus.register(handler.clone()).await;
 
-    let mut scheduler = Scheduler::new(storage)
+    let mut scheduler = Scheduler::with_storage(Arc::clone(&storage))
         .with_event_bus(event_bus)
         .with_max_concurrent_jobs(5);
 
@@ -485,13 +511,23 @@ async fn test_multiple_concurrent_jobs() {
 
     let (handle, task) = scheduler.start().await;
 
-    // Trigger all jobs
+    // Trigger all jobs and collect run IDs
+    let mut run_ids = Vec::new();
     for i in 1..=3 {
-        handle.trigger(format!("job_{}", i)).await.unwrap();
+        let run_id = handle.trigger(format!("job_{}", i)).await.unwrap();
+        run_ids.push(run_id);
     }
 
     // Wait for all to complete
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    for run_id in run_ids {
+        wait_for_run_status(
+            storage.as_ref(),
+            &run_id,
+            RunStatus::Completed,
+            Duration::from_secs(5),
+        )
+        .await;
+    }
 
     // All 3 jobs should have completed
     assert_eq!(handler.job_completed_count().await, 3);
@@ -558,15 +594,21 @@ async fn test_task_retrying_events_emitted() {
     let handler = RecordingHandler::new();
     event_bus.register(handler.clone()).await;
 
-    let storage = InMemoryStorage::new();
-    let mut scheduler = Scheduler::new(storage).with_event_bus(event_bus);
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut scheduler = Scheduler::with_storage(Arc::clone(&storage)).with_event_bus(event_bus);
     scheduler.register(job);
 
     let (handle, task) = scheduler.start().await;
-    let _run_id = handle.trigger("retry_job").await.unwrap();
+    let run_id = handle.trigger("retry_job").await.unwrap();
 
     // Wait for execution (including retry delays)
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_for_run_status(
+        storage.as_ref(),
+        &run_id,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Verify events
     let events = handler.events().await;
