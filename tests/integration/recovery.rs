@@ -3,6 +3,7 @@
 //! Tests that verify the system can recover from interruptions
 //! and handle failed runs appropriately.
 
+use crate::common::wait_for_run_status;
 use async_trait::async_trait;
 use petit::{
     DagBuilder, InMemoryStorage, Job, JobId, RunId, RunStatus, Scheduler, Storage, StoredRun, Task,
@@ -109,8 +110,8 @@ async fn test_recovery_with_empty_storage() {
 /// Test: Job can be re-triggered after previous run failed.
 #[tokio::test]
 async fn test_retrigger_after_failure() {
-    let storage = InMemoryStorage::new();
-    let mut scheduler = Scheduler::new(storage);
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut scheduler = Scheduler::with_storage(Arc::clone(&storage));
 
     let dag = DagBuilder::new("dag", "Test DAG")
         .add_task(SuccessTask::new("task"))
@@ -122,13 +123,25 @@ async fn test_retrigger_after_failure() {
 
     let (handle, task) = scheduler.start().await;
 
-    // First trigger
+    // First trigger - wait for completion
     let run1 = handle.trigger("retrigger_job").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_run_status(
+        storage.as_ref(),
+        &run1,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Second trigger (should work even though first completed)
     let run2 = handle.trigger("retrigger_job").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_run_status(
+        storage.as_ref(),
+        &run2,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Both runs should have unique IDs
     assert_ne!(run1, run2);
@@ -170,8 +183,8 @@ async fn test_scheduler_state_transitions() {
 /// Test: Manual triggers work while scheduler is paused.
 #[tokio::test]
 async fn test_manual_trigger_while_paused() {
-    let storage = InMemoryStorage::new();
-    let mut scheduler = Scheduler::new(storage);
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut scheduler = Scheduler::with_storage(Arc::clone(&storage));
 
     let dag = DagBuilder::new("dag", "Test DAG")
         .add_task(SuccessTask::new("task"))
@@ -191,7 +204,14 @@ async fn test_manual_trigger_while_paused() {
     let run_id = handle.trigger("manual_job").await.unwrap();
     assert!(!run_id.as_uuid().is_nil());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for run to complete
+    wait_for_run_status(
+        storage.as_ref(),
+        &run_id,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     handle.shutdown().await.unwrap();
     let _ = task.await;
@@ -217,10 +237,15 @@ async fn test_run_status_transitions() {
     let run_id = handle.trigger("status_job").await.unwrap();
 
     // Wait for completion
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let run = wait_for_run_status(
+        storage.as_ref(),
+        &run_id,
+        RunStatus::Completed,
+        Duration::from_secs(5),
+    )
+    .await;
 
     // Check final status
-    let run = storage.get_run(&run_id).await.unwrap();
     assert_eq!(run.status, RunStatus::Completed);
     assert!(run.ended_at.is_some());
     assert!(run.duration.is_some());
@@ -260,9 +285,16 @@ async fn test_failed_run_has_error() {
     let (handle, task) = scheduler.start().await;
 
     let run_id = handle.trigger("fail_job").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let run = storage.get_run(&run_id).await.unwrap();
+    // Wait for run to fail
+    let run = wait_for_run_status(
+        storage.as_ref(),
+        &run_id,
+        RunStatus::Failed,
+        Duration::from_secs(5),
+    )
+    .await;
+
     assert_eq!(run.status, RunStatus::Failed);
     assert!(run.error.is_some());
 
@@ -293,4 +325,96 @@ async fn test_multiple_recovery_cycles() {
     // Status should still be interrupted
     let final_run = storage.get_run(&run.id).await.unwrap();
     assert_eq!(final_run.status, RunStatus::Interrupted);
+}
+
+/// Test: Recovery marks task states as failed to ensure consistency.
+#[tokio::test]
+async fn test_recovery_marks_task_states_as_failed() {
+    use petit::{StoredTaskState, TaskId, TaskRunStatus};
+
+    let storage = Arc::new(InMemoryStorage::new());
+
+    // Create an interrupted run with task states in various states
+    let run_id = RunId::new();
+    let job_id = JobId::new("job1");
+    let mut run = StoredRun::new(run_id.clone(), job_id);
+    run.mark_running();
+    storage.save_run(run.clone()).await.unwrap();
+
+    // Create task states: one pending, one running, one completed
+    let task1_id = TaskId::new("task1");
+    let task2_id = TaskId::new("task2");
+    let task3_id = TaskId::new("task3");
+
+    let task1_state = StoredTaskState::new(task1_id.clone(), run_id.clone());
+    storage.save_task_state(task1_state).await.unwrap();
+
+    let mut task2_state = StoredTaskState::new(task2_id.clone(), run_id.clone());
+    task2_state.mark_running();
+    storage.save_task_state(task2_state).await.unwrap();
+
+    let mut task3_state = StoredTaskState::new(task3_id.clone(), run_id.clone());
+    task3_state.mark_running();
+    task3_state.mark_completed();
+    storage.save_task_state(task3_state).await.unwrap();
+
+    // Perform recovery
+    let scheduler = Scheduler::with_storage(Arc::clone(&storage));
+    let recovered = scheduler.recover().await.unwrap();
+    assert_eq!(recovered.len(), 1);
+
+    // Verify run is marked as interrupted
+    let updated_run = storage.get_run(&run_id).await.unwrap();
+    assert_eq!(updated_run.status, RunStatus::Interrupted);
+
+    // Verify task states are updated correctly
+    let updated_task1 = storage.get_task_state(&run_id, &task1_id).await.unwrap();
+    let updated_task2 = storage.get_task_state(&run_id, &task2_id).await.unwrap();
+    let updated_task3 = storage.get_task_state(&run_id, &task3_id).await.unwrap();
+
+    // Pending and running tasks should be marked as failed
+    assert_eq!(updated_task1.status, TaskRunStatus::Failed);
+    assert!(updated_task1.error.is_some());
+    assert!(
+        updated_task1
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("interrupted")
+    );
+
+    assert_eq!(updated_task2.status, TaskRunStatus::Failed);
+    assert!(updated_task2.error.is_some());
+    assert!(
+        updated_task2
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("interrupted")
+    );
+
+    // Completed task should remain completed
+    assert_eq!(updated_task3.status, TaskRunStatus::Completed);
+    assert!(updated_task3.error.is_none());
+}
+
+/// Test: Recovery handles runs with no task states gracefully.
+#[tokio::test]
+async fn test_recovery_with_no_task_states() {
+    let storage = Arc::new(InMemoryStorage::new());
+
+    // Create an interrupted run without any task states
+    let run_id = RunId::new();
+    let mut run = StoredRun::new(run_id.clone(), JobId::new("job1"));
+    run.mark_running();
+    storage.save_run(run).await.unwrap();
+
+    let scheduler = Scheduler::with_storage(Arc::clone(&storage));
+    let recovered = scheduler.recover().await.unwrap();
+
+    // Recovery should succeed even without task states
+    assert_eq!(recovered.len(), 1);
+
+    let updated_run = storage.get_run(&run_id).await.unwrap();
+    assert_eq!(updated_run.status, RunStatus::Interrupted);
 }

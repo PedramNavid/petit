@@ -59,9 +59,6 @@ impl From<SchedulerError> for ApiError {
     fn from(err: SchedulerError) -> Self {
         match err {
             SchedulerError::JobNotFound(msg) => ApiError::NotFound(msg),
-            SchedulerError::NotRunning => {
-                ApiError::ServiceUnavailable("scheduler is not running".to_string())
-            }
             SchedulerError::DependencyNotSatisfied(msg) => {
                 ApiError::Conflict(format!("dependency not satisfied: {}", msg))
             }
@@ -69,9 +66,6 @@ impl From<SchedulerError> for ApiError {
                 ApiError::TooManyRequests(format!("max concurrent runs exceeded: {}", msg))
             }
             SchedulerError::Storage(e) => e.into(),
-            SchedulerError::AlreadyRunning => {
-                ApiError::Conflict("scheduler is already running".to_string())
-            }
             SchedulerError::ChannelError(msg) => ApiError::Internal(msg),
         }
     }

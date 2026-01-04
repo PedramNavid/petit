@@ -105,7 +105,7 @@ impl Schedule {
         match expression.to_lowercase().as_str() {
             "@yearly" | "@annually" => Self::parse_cron("0 0 1 1 *"),
             "@monthly" => Self::parse_cron("0 0 1 * *"),
-            "@weekly" => Self::parse_cron("0 0 * * 7"),
+            "@weekly" => Self::parse_cron("0 0 * * SUN"),
             "@daily" | "@midnight" => Self::parse_cron("0 0 * * *"),
             "@hourly" => Self::parse_cron("0 * * * *"),
             s if s.starts_with("@every ") => Self::parse_interval(&s[7..]),

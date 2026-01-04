@@ -18,16 +18,48 @@ use super::yaml::{
 };
 
 /// Builder for creating Jobs from YAML configuration.
+///
+/// Converts parsed YAML job configurations into runnable [`Job`] instances
+/// with fully constructed DAGs, task executors, and scheduling information.
 pub struct JobConfigBuilder;
 
 impl JobConfigBuilder {
     /// Build a Job from a JobConfig.
+    ///
+    /// This method converts a parsed YAML configuration into a runnable Job by:
+    /// - Building a DAG from task definitions and dependencies
+    /// - Creating task executors (command, python, etc.)
+    /// - Applying retry policies, timeouts, and conditions
+    /// - Setting up schedules and concurrency limits
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use petit::config::{YamlLoader, JobConfigBuilder};
+    ///
+    /// let yaml = r#"
+    /// id: example
+    /// name: Example Job
+    /// tasks:
+    ///   - id: task1
+    ///     type: command
+    ///     command: echo
+    ///     args: [hello]
+    /// "#;
+    ///
+    /// let config = YamlLoader::parse_job_config(yaml)?;
+    /// let job = JobConfigBuilder::build(config)?;
+    ///
+    /// assert_eq!(job.id().as_str(), "example");
+    /// assert_eq!(job.dag().len(), 1);
+    /// # Ok::<(), petit::config::ConfigError>(())
+    /// ```
     pub fn build(config: JobConfig) -> Result<Job, ConfigError> {
         // Build the DAG from task configs
         let mut dag_builder = DagBuilder::new(&config.id, &config.name);
 
         for task_config in &config.tasks {
-            let task = Self::build_task(task_config)?;
+            let task = Self::build_task(&config.name, task_config)?;
             let condition = task_config
                 .condition
                 .as_ref()
@@ -40,7 +72,7 @@ impl JobConfigBuilder {
 
         let dag = dag_builder
             .build()
-            .map_err(|e| ConfigError::InvalidConfig(e.to_string()))?;
+            .map_err(|e| ConfigError::InvalidConfig(format!("Job '{}': {}", config.name, e)))?;
 
         // Create the job
         let mut job = Job::new(config.id.clone(), &config.name, dag);
@@ -48,8 +80,13 @@ impl JobConfigBuilder {
         // Add schedule if present
         if let Some(schedule_config) = &config.schedule {
             let cron_expr = schedule_config.cron();
-            let schedule = Schedule::new(cron_expr)
-                .map_err(|e| ConfigError::InvalidConfig(format!("invalid schedule: {}", e)))?;
+            let tz = schedule_config.timezone().unwrap_or("UTC");
+            let schedule = Schedule::with_timezone(cron_expr, tz).map_err(|e| {
+                ConfigError::InvalidConfig(format!(
+                    "Job '{}': invalid schedule: {} {}",
+                    config.name, cron_expr, e
+                ))
+            })?;
             job = job.with_schedule(schedule);
         }
 
@@ -57,8 +94,12 @@ impl JobConfigBuilder {
         let mut job_config_map = std::collections::HashMap::new();
         for (key, value) in &config.config {
             // Convert serde_yaml::Value to serde_json::Value
-            let json_value = serde_json::to_value(value)
-                .map_err(|e| ConfigError::InvalidConfig(e.to_string()))?;
+            let json_value = serde_json::to_value(value).map_err(|e| {
+                ConfigError::InvalidConfig(format!(
+                    "Job '{}': failed to convert config key '{}': {}",
+                    config.name, key, e
+                ))
+            })?;
             job_config_map.insert(key.clone(), json_value);
         }
         if !job_config_map.is_empty() {
@@ -78,6 +119,7 @@ impl JobConfigBuilder {
 
     /// Build a Task from TaskConfig.
     fn build_task(
+        job_name: &str,
         config: &super::yaml::TaskConfig,
     ) -> Result<Arc<dyn crate::core::task::Task>, ConfigError> {
         match &config.task_type {
@@ -145,8 +187,8 @@ impl JobConfigBuilder {
                 Ok(Arc::new(builder.build()))
             }
             TaskTypeConfig::Custom { handler, .. } => Err(ConfigError::InvalidConfig(format!(
-                "custom task type '{}' is not supported yet",
-                handler
+                "Job '{}': Task '{}': custom task type '{}' is not supported yet",
+                job_name, config.id, handler
             ))),
         }
     }
@@ -174,19 +216,42 @@ impl JobConfigBuilder {
 }
 
 /// Load all job configurations from a directory.
+///
+/// Reads all `.yaml` and `.yml` files in the directory, parses them as job configurations,
+/// and builds runnable Job instances. Files that are not valid YAML or do not conform
+/// to the job configuration schema will cause an error.
+///
+/// # Examples
+///
+/// ```no_run
+/// use petit::config::load_jobs_from_directory;
+///
+/// // Load all jobs from the jobs directory
+/// let jobs = load_jobs_from_directory("./jobs")?;
+///
+/// println!("Loaded {} jobs:", jobs.len());
+/// for job in &jobs {
+///     println!("  - {} ({})", job.name(), job.id());
+///     if job.is_scheduled() {
+///         println!("    Scheduled job");
+///     }
+/// }
+/// # Ok::<(), petit::config::ConfigError>(())
+/// ```
 pub fn load_jobs_from_directory(dir: impl AsRef<Path>) -> Result<Vec<Job>, ConfigError> {
     let dir = dir.as_ref();
     let mut jobs = Vec::new();
 
-    if !dir.is_dir() {
-        return Err(ConfigError::InvalidConfig(format!(
-            "'{}' is not a directory",
-            dir.display()
-        )));
-    }
+    let entries = std::fs::read_dir(dir).map_err(|source| ConfigError::DirReadError {
+        path: dir.to_path_buf(),
+        source,
+    })?;
 
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+    for entry in entries {
+        let entry = entry.map_err(|source| ConfigError::DirReadError {
+            path: dir.to_path_buf(),
+            source,
+        })?;
         let path = entry.path();
 
         // Only process .yaml and .yml files
@@ -382,5 +447,19 @@ tasks:
         let job = JobConfigBuilder::build(config).unwrap();
 
         assert!(!job.is_enabled());
+    }
+
+    #[test]
+    fn test_dir_read_error_includes_path() {
+        let nonexistent_dir = "/nonexistent/jobs/directory";
+        let result = super::load_jobs_from_directory(nonexistent_dir);
+
+        match result {
+            Err(ConfigError::DirReadError { path, source }) => {
+                assert_eq!(path.to_str(), Some(nonexistent_dir));
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            _ => panic!("Expected DirReadError with path context"),
+        }
     }
 }

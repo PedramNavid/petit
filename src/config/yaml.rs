@@ -3,8 +3,8 @@
 //! Parses job definitions and global configuration from YAML files.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -13,11 +13,35 @@ use thiserror::Error;
 pub enum ConfigError {
     /// Failed to read configuration file.
     #[error("failed to read file: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(std::io::Error),
+
+    /// Failed to read a specific file with context.
+    #[error("failed to read file '{path}': {source}")]
+    FileReadError {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Failed to read a directory with context.
+    #[error("failed to read directory '{path}': {source}")]
+    DirReadError {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     /// Failed to parse YAML.
     #[error("YAML parse error: {0}")]
-    YamlError(#[from] serde_yaml::Error),
+    YamlError(serde_yaml::Error),
+
+    /// Failed to parse YAML from a specific file.
+    #[error("YAML parse error in '{path}': {source}")]
+    YamlFileError {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
 
     /// Invalid configuration value.
     #[error("invalid configuration: {0}")]
@@ -262,30 +286,126 @@ pub enum JobDependencyConditionConfig {
 }
 
 /// YAML configuration loader.
+///
+/// Provides methods to load and parse configuration from YAML files or strings.
 pub struct YamlLoader;
 
 impl YamlLoader {
     /// Load global configuration from a file.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use petit::config::YamlLoader;
+    ///
+    /// let config = YamlLoader::load_global_config("petit.yaml")?;
+    /// println!("Max concurrent jobs: {:?}", config.max_concurrent_jobs);
+    /// # Ok::<(), petit::config::ConfigError>(())
+    /// ```
     pub fn load_global_config(path: impl AsRef<Path>) -> Result<GlobalConfig, ConfigError> {
-        let content = std::fs::read_to_string(path)?;
-        Self::parse_global_config(&content)
+        let path = path.as_ref();
+        let content =
+            std::fs::read_to_string(path).map_err(|source| ConfigError::FileReadError {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Self::parse_global_config(&content).map_err(|e| match e {
+            ConfigError::YamlError(source) => ConfigError::YamlFileError {
+                path: path.to_path_buf(),
+                source,
+            },
+            ConfigError::InvalidConfig(msg) => ConfigError::InvalidConfig(format!(
+                "in global config file '{}': {}",
+                path.display(),
+                msg
+            )),
+            other => other,
+        })
     }
 
     /// Parse global configuration from a YAML string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use petit::config::YamlLoader;
+    ///
+    /// let yaml = r#"
+    /// default_timezone: UTC
+    /// max_concurrent_jobs: 5
+    /// "#;
+    ///
+    /// let config = YamlLoader::parse_global_config(yaml)?;
+    /// assert_eq!(config.default_timezone, Some("UTC".to_string()));
+    /// assert_eq!(config.max_concurrent_jobs, Some(5));
+    /// # Ok::<(), petit::config::ConfigError>(())
+    /// ```
     pub fn parse_global_config(yaml: &str) -> Result<GlobalConfig, ConfigError> {
-        let config: GlobalConfig = serde_yaml::from_str(yaml)?;
+        let config: GlobalConfig = serde_yaml::from_str(yaml).map_err(ConfigError::YamlError)?;
         Ok(config)
     }
 
     /// Load a job configuration from a file.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use petit::config::YamlLoader;
+    ///
+    /// let config = YamlLoader::load_job_config("jobs/my_job.yaml")?;
+    /// println!("Job: {} ({})", config.name, config.id);
+    /// println!("Tasks: {}", config.tasks.len());
+    /// # Ok::<(), petit::config::ConfigError>(())
+    /// ```
     pub fn load_job_config(path: impl AsRef<Path>) -> Result<JobConfig, ConfigError> {
-        let content = std::fs::read_to_string(path)?;
-        Self::parse_job_config(&content)
+        let path = path.as_ref();
+        let content =
+            std::fs::read_to_string(path).map_err(|source| ConfigError::FileReadError {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Self::parse_job_config(&content).map_err(|e| match e {
+            ConfigError::YamlError(source) => ConfigError::YamlFileError {
+                path: path.to_path_buf(),
+                source,
+            },
+            ConfigError::InvalidConfig(msg) => {
+                ConfigError::InvalidConfig(format!("in file '{}': {}", path.display(), msg))
+            }
+            ConfigError::MissingField(field) => {
+                ConfigError::MissingField(format!("{} (in file '{}')", field, path.display()))
+            }
+            other => other,
+        })
     }
 
     /// Parse a job configuration from a YAML string.
+    ///
+    /// The configuration is validated to ensure it is well-formed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use petit::config::YamlLoader;
+    ///
+    /// let yaml = r#"
+    /// id: example
+    /// name: Example Job
+    /// schedule: "@daily"
+    /// tasks:
+    ///   - id: task1
+    ///     type: command
+    ///     command: echo
+    ///     args: [hello]
+    /// "#;
+    ///
+    /// let config = YamlLoader::parse_job_config(yaml)?;
+    /// assert_eq!(config.id, "example");
+    /// assert_eq!(config.tasks.len(), 1);
+    /// # Ok::<(), petit::config::ConfigError>(())
+    /// ```
     pub fn parse_job_config(yaml: &str) -> Result<JobConfig, ConfigError> {
-        let config: JobConfig = serde_yaml::from_str(yaml)?;
+        let config: JobConfig = serde_yaml::from_str(yaml).map_err(ConfigError::YamlError)?;
         Self::validate_job_config(&config)?;
         Ok(config)
     }
@@ -299,21 +419,36 @@ impl YamlLoader {
 
         // Check for empty name
         if config.name.is_empty() {
-            return Err(ConfigError::MissingField("name".into()));
+            return Err(ConfigError::MissingField(format!(
+                "name (job id: '{}')",
+                config.id
+            )));
         }
 
         // Check for at least one task
         if config.tasks.is_empty() {
-            return Err(ConfigError::InvalidConfig(
-                "job must have at least one task".into(),
-            ));
+            return Err(ConfigError::InvalidConfig(format!(
+                "Job '{}': must have at least one task",
+                config.name
+            )));
         }
 
         // Check that max_concurrency is not zero (would make jobs un-runnable)
         if config.max_concurrency == Some(0) {
-            return Err(ConfigError::InvalidConfig(
-                "max_concurrency cannot be zero".into(),
-            ));
+            return Err(ConfigError::InvalidConfig(format!(
+                "Job '{}': max_concurrency cannot be zero",
+                config.name
+            )));
+        }
+
+        // Validate schedule if present
+        if let Some(schedule) = &config.schedule {
+            let cron_expr = schedule.cron();
+            let tz = schedule.timezone().unwrap_or("UTC");
+
+            // Validate by attempting to parse the schedule
+            crate::core::schedule::Schedule::with_timezone(cron_expr, tz)
+                .map_err(|e| ConfigError::InvalidConfig(format!("invalid schedule: {}", e)))?;
         }
 
         // Check for duplicate task IDs
@@ -321,22 +456,104 @@ impl YamlLoader {
         for task in &config.tasks {
             if !task_ids.insert(&task.id) {
                 return Err(ConfigError::InvalidConfig(format!(
-                    "duplicate task id: {}",
-                    task.id
+                    "Job '{}': duplicate Task ID '{}'",
+                    config.name, task.id
                 )));
             }
         }
 
-        // Check that task dependencies reference valid tasks
+        // Check that task dependencies reference valid tasks, no self-dependencies, and no duplicates
         for task in &config.tasks {
+            let mut seen_deps = HashSet::new();
             for dep in &task.depends_on {
-                if !task_ids.contains(dep.as_str()) {
+                // Check self-dependency
+                if dep == &task.id {
                     return Err(ConfigError::InvalidConfig(format!(
-                        "task '{}' depends on unknown task '{}'",
+                        "task '{}' cannot depend on itself",
+                        task.id
+                    )));
+                }
+                // Check dependency exists
+                if !task_ids.contains(dep.as_str()) {
+                    let available: Vec<&str> = task_ids.iter().copied().collect();
+                    return Err(ConfigError::InvalidConfig(format!(
+                        "Job '{}': Task '{}' depends on unknown task '{}'. Available tasks: {:?}",
+                        config.name, task.id, dep, available
+                    )));
+                }
+                // Check for duplicate dependencies
+                if !seen_deps.insert(dep) {
+                    return Err(ConfigError::InvalidConfig(format!(
+                        "task '{}' has duplicate dependency '{}'",
                         task.id, dep
                     )));
                 }
             }
+        }
+
+        // Check for cycles using topological sort (Kahn's algorithm)
+        Self::validate_no_cycles(config)?;
+
+        Ok(())
+    }
+
+    /// Validate that there are no cycles in the task dependency graph.
+    fn validate_no_cycles(config: &JobConfig) -> Result<(), ConfigError> {
+        // Build dependency graph
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        let mut reverse_deps: HashMap<&str, Vec<&str>> = HashMap::new();
+
+        // Initialize in-degrees for all tasks
+        for task in &config.tasks {
+            in_degree.insert(&task.id, task.depends_on.len());
+            reverse_deps.insert(&task.id, Vec::new());
+        }
+
+        // Build reverse dependency map
+        for task in &config.tasks {
+            for dep in &task.depends_on {
+                reverse_deps.entry(dep.as_str()).or_default().push(&task.id);
+            }
+        }
+
+        // Kahn's algorithm: start with nodes that have no dependencies
+        let mut queue: VecDeque<&str> = in_degree
+            .iter()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut visited_count = 0;
+
+        while let Some(id) = queue.pop_front() {
+            visited_count += 1;
+
+            // Reduce in-degree for all downstream tasks
+            if let Some(downstream) = reverse_deps.get(id) {
+                for next in downstream {
+                    if let Some(degree) = in_degree.get_mut(next) {
+                        *degree -= 1;
+                        if *degree == 0 {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we didn't visit all nodes, there's a cycle
+        if visited_count != config.tasks.len() {
+            // Find tasks that are part of the cycle (those with non-zero in-degree)
+            let cycle_tasks: Vec<&str> = in_degree
+                .iter()
+                .filter(|(_, degree)| **degree > 0)
+                .map(|(id, _)| *id)
+                .collect();
+
+            return Err(ConfigError::InvalidConfig(format!(
+                "dependency cycle detected involving tasks: {}",
+                cycle_tasks.join(", ")
+            )));
         }
 
         Ok(())
@@ -610,6 +827,18 @@ tasks: []
 "#;
         let result = YamlLoader::parse_job_config(yaml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(
+                msg.contains("No Tasks Job"),
+                "Error should include job name: {}",
+                msg
+            );
+            assert!(
+                msg.contains("must have at least one task"),
+                "Error should describe the issue: {}",
+                msg
+            );
+        }
     }
 
     #[test]
@@ -627,6 +856,23 @@ tasks:
 "#;
         let result = YamlLoader::parse_job_config(yaml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(
+                msg.contains("Duplicate Task Job"),
+                "Error should include job name: {}",
+                msg
+            );
+            assert!(
+                msg.contains("duplicate Task ID"),
+                "Error should describe duplicate task ID: {}",
+                msg
+            );
+            assert!(
+                msg.contains("task1"),
+                "Error should include task ID: {}",
+                msg
+            );
+        }
     }
 
     #[test]
@@ -642,6 +888,28 @@ tasks:
 "#;
         let result = YamlLoader::parse_job_config(yaml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(
+                msg.contains("Invalid Dependency Job"),
+                "Error should include job name: {}",
+                msg
+            );
+            assert!(
+                msg.contains("task1"),
+                "Error should include task name: {}",
+                msg
+            );
+            assert!(
+                msg.contains("nonexistent"),
+                "Error should include invalid dependency: {}",
+                msg
+            );
+            assert!(
+                msg.contains("Available tasks"),
+                "Error should list available tasks: {}",
+                msg
+            );
+        }
     }
 
     #[test]
@@ -658,7 +926,16 @@ tasks:
         let result = YamlLoader::parse_job_config(yaml);
         assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
         if let Err(ConfigError::InvalidConfig(msg)) = result {
-            assert!(msg.contains("max_concurrency cannot be zero"));
+            assert!(
+                msg.contains("Zero Concurrency Job"),
+                "Error should include job name: {}",
+                msg
+            );
+            assert!(
+                msg.contains("max_concurrency cannot be zero"),
+                "Error should describe the issue: {}",
+                msg
+            );
         }
     }
 
@@ -796,6 +1073,380 @@ tasks:
                 assert!(config.contains_key("param2"));
             }
             _ => panic!("Expected Custom task type"),
+        }
+    }
+
+    #[test]
+    fn test_validation_error_invalid_cron_expression() {
+        let yaml = r#"
+id: invalid_cron_job
+name: Invalid Cron Job
+schedule: "foo bar baz"
+tasks:
+  - id: task1
+    type: command
+    command: echo
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("invalid schedule"));
+        }
+    }
+
+    #[test]
+    fn test_validation_error_invalid_timezone() {
+        let yaml = r#"
+id: invalid_tz_job
+name: Invalid Timezone Job
+schedule:
+  cron: "0 9 * * *"
+  timezone: "Invalid/Timezone"
+tasks:
+  - id: task1
+    type: command
+    command: echo
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("invalid schedule"));
+            assert!(msg.contains("timezone"));
+        }
+    }
+
+    #[test]
+    fn test_validation_error_invalid_shortcut() {
+        let yaml = r#"
+id: invalid_shortcut_job
+name: Invalid Shortcut Job
+schedule: "@invalid"
+tasks:
+  - id: task1
+    type: command
+    command: echo
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("invalid schedule"));
+        }
+    }
+
+    #[test]
+    fn test_validation_success_valid_cron() {
+        let yaml = r#"
+id: valid_cron_job
+name: Valid Cron Job
+schedule: "0 9 * * *"
+tasks:
+  - id: task1
+    type: command
+    command: echo
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_success_valid_cron_with_timezone() {
+        let yaml = r#"
+id: valid_cron_tz_job
+name: Valid Cron with Timezone Job
+schedule:
+  cron: "0 9 * * *"
+  timezone: "America/New_York"
+tasks:
+  - id: task1
+    type: command
+    command: echo
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_success_valid_shortcut() {
+        let yaml = r#"
+id: valid_shortcut_job
+name: Valid Shortcut Job
+schedule: "@daily"
+tasks:
+  - id: task1
+    type: command
+    command: echo
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_success_valid_interval() {
+        let yaml = r#"
+id: valid_interval_job
+name: Valid Interval Job
+schedule: "@every 5m"
+tasks:
+  - id: task1
+    type: command
+    command: echo
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_error_self_dependency() {
+        let yaml = r#"
+id: self_dep_job
+name: Self Dependency Job
+tasks:
+  - id: task1
+    type: command
+    command: echo
+    depends_on: [task1]
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("cannot depend on itself"));
+            assert!(msg.contains("task1"));
+        }
+    }
+
+    #[test]
+    fn test_file_read_error_includes_path() {
+        let nonexistent_path = "/nonexistent/path/to/job.yaml";
+        let result = YamlLoader::load_job_config(nonexistent_path);
+
+        match result {
+            Err(ConfigError::FileReadError { path, source }) => {
+                assert_eq!(path.to_str(), Some(nonexistent_path));
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            _ => panic!("Expected FileReadError with path context"),
+        }
+    }
+
+    #[test]
+    fn test_validation_error_duplicate_dependency() {
+        let yaml = r#"
+id: dup_dep_job
+name: Duplicate Dependency Job
+tasks:
+  - id: task1
+    type: command
+    command: echo
+  - id: task2
+    type: command
+    command: echo
+    depends_on: [task1, task1]
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("duplicate dependency"));
+            assert!(msg.contains("task2"));
+        }
+    }
+
+    #[test]
+    fn test_yaml_file_error_includes_path() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_invalid_yaml.yaml");
+
+        // Write invalid YAML to a temporary file
+        let mut file = std::fs::File::create(&test_file).unwrap();
+        writeln!(file, "{{invalid yaml: [unclosed").unwrap();
+        drop(file);
+
+        let result = YamlLoader::load_job_config(&test_file);
+
+        // Clean up
+        let _ = std::fs::remove_file(&test_file);
+
+        match result {
+            Err(ConfigError::YamlFileError { path, source: _ }) => {
+                assert_eq!(path, test_file);
+            }
+            other => panic!("Expected YamlFileError, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validation_error_simple_cycle() {
+        let yaml = r#"
+id: cycle_job
+name: Cycle Job
+tasks:
+  - id: task1
+    type: command
+    command: echo
+    depends_on: [task2]
+  - id: task2
+    type: command
+    command: echo
+    depends_on: [task1]
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("cycle detected"));
+        }
+    }
+
+    #[test]
+    fn test_global_config_file_read_error_includes_path() {
+        let nonexistent_path = "/nonexistent/global/config.yaml";
+        let result = YamlLoader::load_global_config(nonexistent_path);
+
+        match result {
+            Err(ConfigError::FileReadError { path, source }) => {
+                assert_eq!(path.to_str(), Some(nonexistent_path));
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            _ => panic!("Expected FileReadError with path context"),
+        }
+    }
+
+    #[test]
+    fn test_validation_error_complex_cycle() {
+        let yaml = r#"
+id: complex_cycle_job
+name: Complex Cycle Job
+tasks:
+  - id: task1
+    type: command
+    command: echo
+  - id: task2
+    type: command
+    command: echo
+    depends_on: [task1]
+  - id: task3
+    type: command
+    command: echo
+    depends_on: [task2]
+  - id: task4
+    type: command
+    command: echo
+    depends_on: [task3, task1]
+  - id: task5
+    type: command
+    command: echo
+    depends_on: [task4]
+  - id: task6
+    type: command
+    command: echo
+    depends_on: [task5, task2]
+"#;
+        // This should pass - it's a valid DAG
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_error_three_way_cycle() {
+        let yaml = r#"
+id: three_way_cycle_job
+name: Three Way Cycle Job
+tasks:
+  - id: task1
+    type: command
+    command: echo
+    depends_on: [task3]
+  - id: task2
+    type: command
+    command: echo
+    depends_on: [task1]
+  - id: task3
+    type: command
+    command: echo
+    depends_on: [task2]
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(matches!(result, Err(ConfigError::InvalidConfig(_))));
+        if let Err(ConfigError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("cycle detected"));
+            // All three tasks should be mentioned as part of the cycle
+            assert!(msg.contains("task1") || msg.contains("task2") || msg.contains("task3"));
+        }
+    }
+
+    #[test]
+    fn test_validation_valid_complex_dag() {
+        let yaml = r#"
+id: complex_dag_job
+name: Complex DAG Job
+tasks:
+  - id: extract1
+    type: command
+    command: ./extract1.sh
+  - id: extract2
+    type: command
+    command: ./extract2.sh
+  - id: transform1
+    type: command
+    command: ./transform1.sh
+    depends_on: [extract1]
+  - id: transform2
+    type: command
+    command: ./transform2.sh
+    depends_on: [extract2]
+  - id: merge
+    type: command
+    command: ./merge.sh
+    depends_on: [transform1, transform2]
+  - id: load
+    type: command
+    command: ./load.sh
+    depends_on: [merge]
+"#;
+        let result = YamlLoader::parse_job_config(yaml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_missing_field_error_includes_file_context() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_missing_field.yaml");
+
+        // Write job config with empty name
+        let mut file = std::fs::File::create(&test_file).unwrap();
+        writeln!(
+            file,
+            r#"
+id: test_job
+name: ""
+tasks:
+  - id: task1
+    type: command
+    command: echo
+"#
+        )
+        .unwrap();
+        drop(file);
+
+        let result = YamlLoader::load_job_config(&test_file);
+
+        // Clean up
+        let _ = std::fs::remove_file(&test_file);
+
+        match result {
+            Err(ConfigError::MissingField(msg)) => {
+                assert!(
+                    msg.contains("in file"),
+                    "Error should include file context: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains(&test_file.display().to_string()),
+                    "Error should include file path: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected MissingField error, got: {:?}", other),
         }
     }
 }
