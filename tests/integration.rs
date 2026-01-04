@@ -9,8 +9,6 @@
 
 mod common;
 
-mod common;
-
 mod integration {
     pub mod api;
     pub mod recovery;
