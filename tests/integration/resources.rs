@@ -8,6 +8,7 @@ use petit::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,8 @@ struct SlowTask {
     duration: Duration,
     start_order: Arc<AtomicU32>,
     my_order: AtomicU32,
+    start_time: Mutex<Option<Instant>>,
+    end_time: Mutex<Option<Instant>>,
 }
 
 impl SlowTask {
@@ -26,11 +29,21 @@ impl SlowTask {
             duration,
             start_order,
             my_order: AtomicU32::new(0),
+            start_time: Mutex::new(None),
+            end_time: Mutex::new(None),
         })
     }
 
     fn order(&self) -> u32 {
         self.my_order.load(Ordering::SeqCst)
+    }
+
+    fn start_time(&self) -> Instant {
+        self.start_time.lock().unwrap().expect("task not started")
+    }
+
+    fn end_time(&self) -> Instant {
+        self.end_time.lock().unwrap().expect("task not ended")
     }
 }
 
@@ -41,9 +54,11 @@ impl Task for SlowTask {
     }
 
     async fn execute(&self, _ctx: &mut TaskContext) -> Result<(), TaskError> {
+        *self.start_time.lock().unwrap() = Some(Instant::now());
         let order = self.start_order.fetch_add(1, Ordering::SeqCst);
         self.my_order.store(order, Ordering::SeqCst);
         tokio::time::sleep(self.duration).await;
+        *self.end_time.lock().unwrap() = Some(Instant::now());
         Ok(())
     }
 }
@@ -402,16 +417,14 @@ async fn test_fan_out_pattern() {
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
-    let start = Instant::now();
     let result = executor.execute(&dag, &mut ctx).await;
-    let elapsed = start.elapsed();
 
     assert!(result.success);
 
     // A should be first
     assert_eq!(task_a.order(), 0);
 
-    // B, C, D should start after A (orders 1, 2, 3 in some order, verifying parallelism)
+    // B, C, D should start after A (orders 1, 2, 3 in some order)
     let b_order = task_b.order();
     let c_order = task_c.order();
     let d_order = task_d.order();
@@ -420,14 +433,26 @@ async fn test_fan_out_pattern() {
     assert!((1..=3).contains(&c_order));
     assert!((1..=3).contains(&d_order));
 
-    // Use relative timing: with fan-out parallelism should be much faster than sequential
-    // Sequential would be: 20 + 50 + 50 + 50 = 170ms
-    // Parallel should be: 20 + max(50,50,50) = 70ms
-    // Allow generous margin (3x parallel time) for slow machines
+    // Verify parallelism: B, C, D must have overlapping execution windows.
+    // If running in parallel, there's a point when all three are executing:
+    // max(start_times) < min(end_times)
+    // If sequential, one would finish before the next starts, failing this check.
+    let latest_start = task_b
+        .start_time()
+        .max(task_c.start_time())
+        .max(task_d.start_time());
+    let earliest_end = task_b
+        .end_time()
+        .min(task_c.end_time())
+        .min(task_d.end_time());
+
     assert!(
-        elapsed < Duration::from_millis(210),
-        "Fan-out should be parallel (<210ms), got {:?}. Sequential would be ~170ms.",
-        elapsed
+        latest_start < earliest_end,
+        "B, C, D should run in parallel (overlapping execution windows). \
+         Latest start: {:?}, Earliest end: {:?}. \
+         If sequential, the first task would end before the last starts.",
+        latest_start,
+        earliest_end
     );
 }
 
@@ -495,9 +520,7 @@ async fn test_diamond_pattern() {
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
-    let start = Instant::now();
     let result = executor.execute(&dag, &mut ctx).await;
-    let elapsed = start.elapsed();
 
     assert!(result.success);
 
@@ -505,20 +528,25 @@ async fn test_diamond_pattern() {
     assert_eq!(task_a.order(), 0, "A should start first");
     assert_eq!(task_d.order(), 3, "D should start last");
 
-    // B and C should be in the middle (orders 1 and 2), verifying they ran in parallel
+    // B and C should be in the middle (orders 1 and 2)
     let b_order = task_b.order();
     let c_order = task_c.order();
     assert!(b_order == 1 || b_order == 2);
     assert!(c_order == 1 || c_order == 2);
 
-    // Use relative timing: diamond pattern with parallelism should be faster than sequential
-    // Sequential would be: 20 + 30 + 40 + 20 = 110ms
-    // Parallel should be: 20 + max(30,40) + 20 = 80ms
-    // Allow generous margin (2x parallel time) for slow machines
+    // Verify parallelism: B and C must have overlapping execution windows.
+    // If running in parallel: max(start_times) < min(end_times)
+    // If sequential, one would finish before the other starts.
+    let latest_start = task_b.start_time().max(task_c.start_time());
+    let earliest_end = task_b.end_time().min(task_c.end_time());
+
     assert!(
-        elapsed < Duration::from_millis(160),
-        "Diamond should exploit parallelism (<160ms), got {:?}. Sequential would be ~110ms.",
-        elapsed
+        latest_start < earliest_end,
+        "B and C should run in parallel (overlapping execution windows). \
+         Latest start: {:?}, Earliest end: {:?}. \
+         If sequential, one task would end before the other starts.",
+        latest_start,
+        earliest_end
     );
 }
 
