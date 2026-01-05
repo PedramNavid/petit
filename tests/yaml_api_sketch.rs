@@ -5,12 +5,11 @@
 
 use async_trait::async_trait;
 use petit::{
-    CommandTask, DagBuilder, DagExecutor, Environment, Job, JobBuilder, Schedule, Task,
-    TaskCondition, TaskContext, TaskError, TaskExecutor, TaskId, YamlLoader,
+    CommandTask, ContextStore, DagBuilder, DagExecutor, Environment, Job, JobBuilder, Schedule,
+    Task, TaskCondition, TaskContext, TaskError, TaskExecutor, TaskId, YamlLoader,
 };
-use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// This is what a user's YAML job definition looks like:
 ///
@@ -120,7 +119,7 @@ impl Task for MockCommandTask {
 }
 
 fn create_test_context() -> TaskContext {
-    let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     TaskContext::new(store, TaskId::new("test"), config)
 }
@@ -236,7 +235,7 @@ async fn test_task_context_data_flow() {
     // Demonstrate how data flows between tasks via context
 
     // Shared context store (this is what the executor manages)
-    let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
 
     // Simulate extract task writing output
@@ -248,6 +247,9 @@ async fn test_task_context_data_flow() {
         ctx.outputs
             .set("output_path", "/tmp/extracted.parquet")
             .unwrap();
+
+        // Merge outputs to shared store (executor does this on success)
+        store.merge(&ctx.outputs).unwrap();
     }
 
     // Simulate transform task reading from extract
@@ -263,6 +265,9 @@ async fn test_task_context_data_flow() {
 
         // Transform writes its own output
         ctx.outputs.set("transformed_rows", row_count * 2).unwrap();
+
+        // Merge outputs to shared store
+        store.merge(&ctx.outputs).unwrap();
     }
 
     // Simulate load task reading from transform
@@ -280,7 +285,7 @@ fn test_config_access() {
 
     use serde_json::json;
 
-    let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
+    let store = ContextStore::new();
 
     // Job-level config (would come from YAML)
     let mut config = HashMap::new();

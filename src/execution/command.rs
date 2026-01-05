@@ -72,23 +72,23 @@
 //! `{task_name}.stderr`.
 //!
 //! ```rust
-//! use petit::{ContextReader, ContextWriter, TaskId};
-//! use std::sync::{Arc, RwLock};
+//! use petit::{ContextStore, OutputBuffer, TaskId};
 //! use std::collections::HashMap;
-//! use serde_json::Value;
 //!
 //! // Create a shared context store (normally managed by the executor)
-//! let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
+//! let store = ContextStore::new();
 //!
 //! // Upstream task writes output (simulating what CommandTask does internally)
-//! let writer = ContextWriter::new(store.clone(), TaskId::new("extract"));
-//! writer.set("row_count", 1000).unwrap();
-//! writer.set("status", "success").unwrap();
+//! let buffer = OutputBuffer::new(TaskId::new("extract"));
+//! buffer.set("row_count", 1000).unwrap();
+//! buffer.set("status", "success").unwrap();
+//!
+//! // Merge outputs to shared store (executor does this on success)
+//! store.merge(&buffer).unwrap();
 //!
 //! // Downstream task reads the data using "{upstream_task}.{key}" format
-//! let reader = ContextReader::new(store);
-//! let count: i32 = reader.get("extract.row_count").unwrap();
-//! let status: String = reader.get("extract.status").unwrap();
+//! let count: i32 = store.get("extract.row_count").unwrap();
+//! let status: String = store.get("extract.status").unwrap();
 //! assert_eq!(count, 1000);
 //! assert_eq!(status, "success");
 //! ```
@@ -445,16 +445,23 @@ impl CommandTaskBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::context::ContextStore;
     use crate::core::retry::RetryCondition;
     use crate::core::types::TaskId;
-    use serde_json::Value;
     use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
 
     fn create_test_context() -> TaskContext {
-        let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
+        let store = ContextStore::new();
         let config = Arc::new(HashMap::new());
         TaskContext::new(store, TaskId::new("test"), config)
+    }
+
+    /// Helper to get output from context buffer after task execution
+    fn get_output<T: serde::de::DeserializeOwned>(ctx: &TaskContext, key: &str) -> Option<T> {
+        ctx.outputs
+            .get_raw(key)
+            .and_then(|v| serde_json::from_value(v).ok())
     }
 
     #[test]
@@ -502,7 +509,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Check stdout was captured (stored with task name prefix)
-        let stdout: String = ctx.inputs.get("test.stdout").unwrap();
+        let stdout: String = get_output(&ctx, "test.stdout").unwrap();
         assert_eq!(stdout.trim(), "hello");
     }
 
@@ -520,7 +527,7 @@ mod tests {
 
         assert!(result.is_ok());
 
-        let stdout: String = ctx.inputs.get("test.stdout").unwrap();
+        let stdout: String = get_output(&ctx, "test.stdout").unwrap();
         assert_eq!(stdout.trim(), "test_value");
     }
 
@@ -536,7 +543,7 @@ mod tests {
 
         assert!(result.is_ok());
 
-        let stdout: String = ctx.inputs.get("test.stdout").unwrap();
+        let stdout: String = get_output(&ctx, "test.stdout").unwrap();
         assert_eq!(stdout.trim(), "/tmp");
     }
 
@@ -566,7 +573,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Exit code should be stored even on success
-        let exit_code: i32 = ctx.inputs.get("test.exit_code").unwrap();
+        let exit_code: i32 = get_output(&ctx, "test.exit_code").unwrap();
         assert_eq!(exit_code, 0);
     }
 
@@ -584,7 +591,7 @@ mod tests {
         assert!(result.is_err());
 
         // Exit code should be stored even on failure
-        let exit_code: i32 = ctx.inputs.get("test.exit_code").unwrap();
+        let exit_code: i32 = get_output(&ctx, "test.exit_code").unwrap();
         assert_eq!(exit_code, 42);
     }
 
@@ -601,8 +608,8 @@ mod tests {
 
         assert!(result.is_ok());
 
-        let stdout: String = ctx.inputs.get("test.stdout").unwrap();
-        let stderr: String = ctx.inputs.get("test.stderr").unwrap();
+        let stdout: String = get_output(&ctx, "test.stdout").unwrap();
+        let stderr: String = get_output(&ctx, "test.stderr").unwrap();
 
         assert_eq!(stdout.trim(), "stdout_msg");
         assert_eq!(stderr.trim(), "stderr_msg");
@@ -639,8 +646,8 @@ mod tests {
 
         // Even with no output, stdout and stderr should be written to context
         // so downstream tasks can distinguish "not run" from "no output"
-        let stdout: String = ctx.inputs.get("test.stdout").unwrap();
-        let stderr: String = ctx.inputs.get("test.stderr").unwrap();
+        let stdout: String = get_output(&ctx, "test.stdout").unwrap();
+        let stderr: String = get_output(&ctx, "test.stderr").unwrap();
 
         assert_eq!(stdout, "");
         assert_eq!(stderr, "");

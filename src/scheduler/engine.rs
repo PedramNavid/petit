@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 
-use crate::core::context::TaskContext;
+use crate::core::context::{ContextStore, TaskContext};
 use crate::core::job::{DependencyCondition, Job};
 use crate::core::types::{JobId, RunId, TaskId};
 use crate::events::{Event, EventBus};
@@ -515,7 +515,7 @@ impl<S: Storage + 'static> Scheduler<S> {
             job_event_bus.register(forwarder).await;
 
             // Create context for execution
-            let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+            let store = ContextStore::new();
             let config = Arc::new(job.config().clone());
             let mut ctx = TaskContext::new(store, TaskId::new("job"), config);
 

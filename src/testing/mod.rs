@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
-use crate::core::context::TaskContext;
+use crate::core::context::{ContextStore, TaskContext};
 use crate::core::dag::Dag;
 use crate::core::retry::RetryPolicy;
 use crate::core::task::{Task, TaskError};
@@ -34,8 +34,10 @@ use crate::execution::{DagExecutor, DagResult};
 /// mock.set_input("upstream.value", 42);
 ///
 /// // Run your task with mock.as_context()
-/// let ctx = mock.as_context();
-/// // After running a task that writes to "my_task.output":
+/// let mut ctx = mock.as_context();
+/// // After running a task, merge outputs back to the mock:
+/// // mock.merge_outputs(&ctx);
+/// // Then read the output:
 /// // let output: i32 = mock.get_output("my_task.output").unwrap();
 ///
 /// // Verify the input was set
@@ -44,25 +46,30 @@ use crate::execution::{DagExecutor, DagResult};
 /// ```
 pub struct MockTaskContext {
     task_id: TaskId,
-    store: Arc<RwLock<HashMap<String, Value>>>,
+    store: ContextStore,
+    data: Arc<RwLock<HashMap<String, Value>>>,
     config: Arc<HashMap<String, Value>>,
 }
 
 impl MockTaskContext {
     /// Create a new mock context for a task.
     pub fn new(task_id: impl Into<String>) -> Self {
+        let data = Arc::new(RwLock::new(HashMap::new()));
         Self {
             task_id: TaskId::new(task_id),
-            store: Arc::new(RwLock::new(HashMap::new())),
+            store: ContextStore::new(),
+            data,
             config: Arc::new(HashMap::new()),
         }
     }
 
     /// Create a mock context with configuration values.
     pub fn with_config(task_id: impl Into<String>, config: HashMap<String, Value>) -> Self {
+        let data = Arc::new(RwLock::new(HashMap::new()));
         Self {
             task_id: TaskId::new(task_id),
-            store: Arc::new(RwLock::new(HashMap::new())),
+            store: ContextStore::new(),
+            data,
             config: Arc::new(config),
         }
     }
@@ -73,34 +80,45 @@ impl MockTaskContext {
     pub fn set_input<T: serde::Serialize>(&mut self, key: impl Into<String>, value: T) {
         let key = key.into();
         let json_value = serde_json::to_value(value).expect("failed to serialize input value");
-        self.store
+        self.data
             .write()
             .expect("lock poisoned")
             .insert(key, json_value);
+        // Rebuild the store with updated data
+        self.store = ContextStore::from_map(self.data.read().expect("lock poisoned").clone());
+    }
+
+    /// Merge outputs from a TaskContext back into the mock.
+    ///
+    /// Call this after task execution to capture the outputs.
+    pub fn merge_outputs(&mut self, ctx: &TaskContext) {
+        let _ = self.store.merge(&ctx.outputs);
+        // Update our data map to reflect the merged outputs
+        if let Ok(mut data) = self.data.write() {
+            for key in ctx.outputs.keys() {
+                if let Some(value) = ctx.outputs.get_raw(&key) {
+                    data.insert(key, value);
+                }
+            }
+        }
     }
 
     /// Get an output value written by the task.
     ///
     /// Returns `None` if the key doesn't exist or deserialization fails.
+    /// Note: Call `merge_outputs` first to ensure outputs are available.
     pub fn get_output<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
-        self.store
-            .read()
-            .ok()?
-            .get(key)
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        self.store.get_optional(key)
     }
 
     /// Check if an output key was written.
     pub fn has_output(&self, key: &str) -> bool {
-        self.store
-            .read()
-            .map(|s| s.contains_key(key))
-            .unwrap_or(false)
+        self.store.contains(key)
     }
 
     /// Get the underlying store as a HashMap.
     pub fn store(&self) -> HashMap<String, Value> {
-        self.store.read().map(|s| s.clone()).unwrap_or_default()
+        self.data.read().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Convert to a TaskContext for use in task execution.
@@ -341,15 +359,20 @@ impl TestHarness {
     /// Execute a DAG and return the result.
     pub async fn execute(&self, dag: &Dag) -> TestResult {
         // Create context with initial values
-        let store = Arc::new(RwLock::new(self.initial_context.clone()));
+        let store = ContextStore::from_map(self.initial_context.clone());
         let config = Arc::new(HashMap::new());
         let mut ctx = TaskContext::new(store.clone(), TaskId::new("harness"), config);
 
         // Execute the DAG
         let dag_result = self.executor.execute(dag, &mut ctx).await;
 
-        // Extract final context
-        let context = store.read().map(|s| s.clone()).unwrap_or_default();
+        // Extract final context (all keys from the store)
+        let mut context = HashMap::new();
+        for key in store.keys() {
+            if let Some(value) = store.get_optional::<Value>(&key) {
+                context.insert(key, value);
+            }
+        }
 
         TestResult {
             dag_result,
@@ -465,12 +488,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_context_captures_outputs() {
-        let mock = MockTaskContext::new("writer");
+        let mut mock = MockTaskContext::new("writer");
         let ctx = mock.as_context();
 
         // Simulate task writing output
         ctx.outputs.set("result", 100).unwrap();
         ctx.outputs.set("status", "done").unwrap();
+
+        // Merge outputs back to mock
+        mock.merge_outputs(&ctx);
 
         // Verify outputs through mock
         assert_eq!(mock.get_output::<i32>("writer.result"), Some(100));

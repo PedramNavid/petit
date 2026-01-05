@@ -4,7 +4,8 @@
 
 use async_trait::async_trait;
 use petit::{
-    DagBuilder, DagExecutor, InMemoryStorage, Job, Scheduler, Task, TaskContext, TaskError, TaskId,
+    ContextStore, DagBuilder, DagExecutor, InMemoryStorage, Job, Scheduler, Task, TaskContext,
+    TaskError, TaskId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -108,7 +109,7 @@ async fn test_dag_executor_concurrency_limit() {
 
     // Execute with concurrency limit of 2
     let executor = DagExecutor::with_concurrency(2);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
@@ -176,7 +177,7 @@ async fn test_parallel_execution_of_independent_tasks() {
 
     // Execute with high concurrency (all can run in parallel)
     let executor = DagExecutor::with_concurrency(10);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
@@ -228,7 +229,7 @@ async fn test_sequential_execution_with_concurrency_one() {
 
     // Execute with concurrency=1
     let executor = DagExecutor::with_concurrency(1);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
@@ -376,7 +377,7 @@ async fn test_dependency_order_is_respected() {
         .unwrap();
 
     let executor = DagExecutor::with_concurrency(10);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
@@ -413,7 +414,7 @@ async fn test_fan_out_pattern() {
         .unwrap();
 
     let executor = DagExecutor::with_concurrency(10);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
@@ -479,7 +480,7 @@ async fn test_fan_in_pattern() {
         .unwrap();
 
     let executor = DagExecutor::with_concurrency(10);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
@@ -516,7 +517,7 @@ async fn test_diamond_pattern() {
         .unwrap();
 
     let executor = DagExecutor::with_concurrency(10);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
@@ -568,7 +569,7 @@ async fn test_large_dag_execution() {
     let dag = builder.build().unwrap();
 
     let executor = DagExecutor::with_concurrency(4);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 

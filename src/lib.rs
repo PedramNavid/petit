@@ -12,7 +12,7 @@ pub mod api;
 #[cfg(feature = "tui")]
 pub mod tui;
 
-pub use core::context::{ContextError, ContextReader, ContextWriter, TaskContext};
+pub use core::context::{ContextError, ContextStore, OutputBuffer, TaskContext};
 pub use core::dag::{Dag, DagBuilder, DagError, TaskCondition, TaskNode};
 pub use core::environment::Environment;
 pub use core::job::{DependencyCondition, Job, JobBuilder, JobDependency, JobError, validate_jobs};

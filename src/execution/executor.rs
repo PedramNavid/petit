@@ -276,19 +276,19 @@ impl Default for TaskExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::context::ContextStore;
     use crate::core::context::TaskContext;
     use crate::core::retry::RetryPolicy;
     use crate::core::task::TaskError;
     use crate::core::types::TaskId;
     use async_trait::async_trait;
-    use serde_json::Value;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
     fn create_test_context() -> TaskContext {
-        let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
+        let store = ContextStore::new();
         let config = Arc::new(HashMap::new());
         TaskContext::new(store, TaskId::new("test"), config)
     }

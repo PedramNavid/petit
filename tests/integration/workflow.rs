@@ -5,9 +5,9 @@
 use crate::common::wait_for_run_status;
 use async_trait::async_trait;
 use petit::{
-    DagBuilder, DagExecutor, Event, EventBus, EventHandler, InMemoryStorage, Job, JobDependency,
-    RunStatus, Schedule, Scheduler, Task, TaskCondition, TaskContext, TaskError, TaskId,
-    YamlLoader,
+    ContextStore, DagBuilder, DagExecutor, Event, EventBus, EventHandler, InMemoryStorage, Job,
+    JobDependency, RunStatus, Schedule, Scheduler, Task, TaskCondition, TaskContext, TaskError,
+    TaskId, YamlLoader,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -233,7 +233,7 @@ async fn test_complex_dag_with_mixed_conditions() {
 
     // Execute the DAG
     let executor = DagExecutor::with_concurrency(4);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
@@ -381,7 +381,7 @@ async fn test_diamond_dag_execution() {
         .unwrap();
 
     let executor = DagExecutor::with_concurrency(4);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 
@@ -474,7 +474,7 @@ async fn test_context_data_flow_through_dag() {
         .unwrap();
 
     let executor = DagExecutor::with_concurrency(4);
-    let store = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let store = ContextStore::new();
     let config = Arc::new(HashMap::new());
     let mut ctx = TaskContext::new(store, TaskId::new("test"), config);
 

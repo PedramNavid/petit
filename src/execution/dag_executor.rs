@@ -136,7 +136,7 @@ impl DagExecutor {
         let results: Arc<RwLock<HashMap<TaskId, TaskResult>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
-        // Shared context for all tasks
+        // Shared store for all tasks (read-only for tasks, executor merges on success)
         let shared_store = ctx.inputs.clone();
 
         // Execute tasks in waves until all are done
@@ -213,12 +213,8 @@ impl DagExecutor {
                         let node = dag_clone.get_task(&task_id).unwrap();
                         let task = &node.task;
 
-                        // Create task context
-                        let task_store = Arc::new(std::sync::RwLock::new(
-                            store.clone_store().unwrap_or_default(),
-                        ));
-                        let mut task_ctx =
-                            TaskContext::new(task_store.clone(), task_id.clone(), config);
+                        // Create task context with shared store and local output buffer
+                        let mut task_ctx = TaskContext::new(store.clone(), task_id.clone(), config);
 
                         // Execute (uses semaphore for concurrency control)
                         // Pass event bus and dag_id to emit TaskRetrying events during retries
@@ -242,11 +238,9 @@ impl DagExecutor {
                         };
                         let task_duration = task_start.elapsed();
 
-                        // Merge outputs back to shared store
-                        if let Ok(outputs) = task_store.read() {
-                            for (key, value) in outputs.iter() {
-                                let _ = store.set_raw(key, value.clone());
-                            }
+                        // Merge outputs to shared store only on success
+                        if result.success {
+                            let _ = store.merge(&task_ctx.outputs);
                         }
 
                         // Update status based on result
@@ -260,23 +254,18 @@ impl DagExecutor {
                             statuses_write.insert(task_id.clone(), status.clone());
                         }
 
-                        // Read stdout/stderr/exit_code from context
-                        let stdout: Option<String> = task_store
-                            .read()
-                            .ok()
-                            .and_then(|s| s.get(&format!("{}.stdout", task_id.as_str())).cloned())
+                        // Read stdout/stderr/exit_code from output buffer
+                        let stdout: Option<String> = task_ctx
+                            .outputs
+                            .get_raw(&format!("{}.stdout", task_id.as_str()))
                             .and_then(|v| serde_json::from_value(v).ok());
-                        let stderr: Option<String> = task_store
-                            .read()
-                            .ok()
-                            .and_then(|s| s.get(&format!("{}.stderr", task_id.as_str())).cloned())
+                        let stderr: Option<String> = task_ctx
+                            .outputs
+                            .get_raw(&format!("{}.stderr", task_id.as_str()))
                             .and_then(|v| serde_json::from_value(v).ok());
-                        let exit_code: Option<i32> = task_store
-                            .read()
-                            .ok()
-                            .and_then(|s| {
-                                s.get(&format!("{}.exit_code", task_id.as_str())).cloned()
-                            })
+                        let exit_code: Option<i32> = task_ctx
+                            .outputs
+                            .get_raw(&format!("{}.exit_code", task_id.as_str()))
                             .and_then(|v| serde_json::from_value(v).ok());
 
                         // Emit TaskCompleted or TaskFailed event
@@ -483,18 +472,18 @@ impl Default for DagExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::context::ContextStore;
     use crate::core::dag::DagBuilder;
     use crate::core::retry::RetryPolicy;
     use crate::core::task::{Task, TaskError};
     use crate::core::types::TaskId;
     use async_trait::async_trait;
-    use serde_json::Value;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
 
     fn create_shared_context() -> TaskContext {
-        let store = Arc::new(std::sync::RwLock::new(HashMap::<String, Value>::new()));
+        let store = ContextStore::new();
         let config = Arc::new(HashMap::new());
         TaskContext::new(store, TaskId::new("dag"), config)
     }

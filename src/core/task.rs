@@ -123,14 +123,14 @@ pub trait Task: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
+    use crate::core::context::ContextStore;
     use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
     use std::time::Duration;
 
     // Helper to create a TaskContext for testing
     fn create_test_context(task_name: &str) -> TaskContext {
-        let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
+        let store = ContextStore::new();
         let config = Arc::new(HashMap::new());
         TaskContext::new(store, super::super::types::TaskId::new(task_name), config)
     }
@@ -260,7 +260,9 @@ mod tests {
 
         task.execute(&mut ctx).await.unwrap();
 
-        let status: String = ctx.inputs.get("writer.status").unwrap();
+        // Task writes to the local output buffer (prefixed with task id)
+        let status: String =
+            serde_json::from_value(ctx.outputs.get_raw("writer.status").unwrap()).unwrap();
         assert_eq!(status, "completed");
     }
 
@@ -287,11 +289,9 @@ mod tests {
         };
 
         // Set up context with upstream output
-        let store = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
-        {
-            let mut s = store.write().unwrap();
-            s.insert("upstream.value".to_string(), serde_json::json!(21));
-        }
+        let mut initial_data = HashMap::new();
+        initial_data.insert("upstream.value".to_string(), serde_json::json!(21));
+        let store = ContextStore::from_map(initial_data);
         let config = Arc::new(HashMap::new());
         let mut ctx = TaskContext::new(
             store.clone(),
@@ -301,8 +301,9 @@ mod tests {
 
         task.execute(&mut ctx).await.unwrap();
 
-        // Verify output
-        let result: i32 = ctx.inputs.get("transform.result").unwrap();
+        // Merge outputs and verify
+        store.merge(&ctx.outputs).unwrap();
+        let result: i32 = store.get("transform.result").unwrap();
         assert_eq!(result, 42);
     }
 

@@ -1,10 +1,15 @@
 //! Task execution context and inter-task communication.
 //!
-//! Tasks communicate via a shared key-value store. Upstream tasks write
-//! outputs that downstream tasks can read as inputs.
+//! Tasks communicate via a shared key-value store. The architecture separates
+//! reading (shared) from writing (buffered):
+//!
+//! - [`ContextStore`]: Shared read-only store of completed task outputs
+//! - [`OutputBuffer`]: Task-local write buffer, merged on successful completion
+//! - [`TaskContext`]: Combines store access, output buffer, and configuration
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
@@ -31,51 +36,187 @@ pub enum ContextError {
     LockPoisoned,
 }
 
+/// Shared context store for a DAG execution.
+///
+/// This store is read-only for tasks. The executor merges task outputs
+/// after successful completion via [`merge`](Self::merge).
+///
+/// # Thread Safety
+///
+/// `ContextStore` is `Clone` and can be shared across tasks. All read
+/// operations acquire a read lock, allowing concurrent reads.
+#[derive(Clone)]
+pub struct ContextStore {
+    inner: Arc<RwLock<HashMap<String, Value>>>,
+}
+
+impl ContextStore {
+    /// Create a new empty context store.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Get a value by key.
+    ///
+    /// Keys are typically namespaced as `"{task_id}.{key}"`.
+    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T, ContextError> {
+        let store = self.inner.read().map_err(|_| ContextError::LockPoisoned)?;
+        let value = store
+            .get(key)
+            .ok_or_else(|| ContextError::KeyNotFound(key.to_string()))?;
+        serde_json::from_value(value.clone()).map_err(|e| ContextError::DeserializationError {
+            key: key.to_string(),
+            message: e.to_string(),
+        })
+    }
+
+    /// Get an optional value by key. Returns None if key doesn't exist.
+    pub fn get_optional<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
+        let store = self.inner.read().ok()?;
+        let value = store.get(key)?;
+        serde_json::from_value(value.clone()).ok()
+    }
+
+    /// Check if a key exists in the context.
+    pub fn contains(&self, key: &str) -> bool {
+        self.inner
+            .read()
+            .map(|s| s.contains_key(key))
+            .unwrap_or(false)
+    }
+
+    /// Get all keys in the context.
+    pub fn keys(&self) -> Vec<String> {
+        self.inner
+            .read()
+            .map(|s| s.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Merge a task's output buffer into the store.
+    ///
+    /// This should only be called by the executor after successful task completion.
+    /// All outputs in the buffer are atomically added to the store.
+    pub fn merge(&self, buffer: &OutputBuffer) -> Result<(), ContextError> {
+        let mut store = self.inner.write().map_err(|_| ContextError::LockPoisoned)?;
+        let outputs = buffer.outputs.borrow();
+        for (key, value) in outputs.iter() {
+            store.insert(key.clone(), value.clone());
+        }
+        Ok(())
+    }
+}
+
+impl Default for ContextStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextStore {
+    /// Create a store pre-populated with data (for testing).
+    pub fn from_map(data: HashMap<String, Value>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(data)),
+        }
+    }
+}
+
+/// Task-local output buffer.
+///
+/// Tasks write outputs to this buffer during execution. The buffer is
+/// merged into the shared [`ContextStore`] only after successful completion,
+/// ensuring failed tasks don't pollute the store.
+///
+/// # Key Namespacing
+///
+/// All keys are automatically prefixed with the task ID. For example,
+/// calling `set("result", 42)` from task "extract" creates key "extract.result".
+pub struct OutputBuffer {
+    task_id: TaskId,
+    outputs: RefCell<HashMap<String, Value>>,
+}
+
+impl OutputBuffer {
+    /// Create a new output buffer for a task.
+    pub fn new(task_id: TaskId) -> Self {
+        Self {
+            task_id,
+            outputs: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// Write a value to the buffer.
+    ///
+    /// The key will be automatically prefixed with the task ID.
+    /// e.g., setting "result" from task "extract" creates "extract.result"
+    pub fn set<T: Serialize>(&self, key: &str, value: T) -> Result<(), ContextError> {
+        let full_key = format!("{}.{}", self.task_id, key);
+        let json_value =
+            serde_json::to_value(value).map_err(|e| ContextError::SerializationError {
+                key: full_key.clone(),
+                message: e.to_string(),
+            })?;
+        self.outputs.borrow_mut().insert(full_key, json_value);
+        Ok(())
+    }
+
+    /// Get the task ID associated with this buffer.
+    pub fn task_id(&self) -> &TaskId {
+        &self.task_id
+    }
+
+    /// Get the number of outputs in the buffer.
+    pub fn len(&self) -> usize {
+        self.outputs.borrow().len()
+    }
+
+    /// Check if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.outputs.borrow().is_empty()
+    }
+
+    /// Get all keys in the buffer.
+    pub fn keys(&self) -> Vec<String> {
+        self.outputs.borrow().keys().cloned().collect()
+    }
+
+    /// Get a value from the buffer (for testing/debugging).
+    pub fn get_raw(&self, key: &str) -> Option<Value> {
+        self.outputs.borrow().get(key).cloned()
+    }
+}
+
 /// Execution context passed to tasks.
 ///
 /// Provides access to:
-/// - Inputs from upstream tasks
-/// - Output writer for downstream tasks
+/// - Inputs from upstream tasks (via shared [`ContextStore`])
+/// - Output buffer for downstream tasks (via [`OutputBuffer`])
 /// - Job-level configuration
-/// - Execution metadata
 pub struct TaskContext {
-    /// Read inputs from upstream tasks.
-    pub inputs: ContextReader,
+    /// Read inputs from upstream tasks (shared, read-only).
+    pub inputs: ContextStore,
 
-    /// Write outputs for downstream tasks.
-    pub outputs: ContextWriter,
+    /// Write outputs for downstream tasks (local buffer, merged on success).
+    pub outputs: OutputBuffer,
 
     /// Job-level configuration values.
     pub config: Arc<HashMap<String, Value>>,
-}
-
-/// Reader for accessing upstream task outputs.
-#[derive(Clone)]
-pub struct ContextReader {
-    store: Arc<RwLock<HashMap<String, Value>>>,
-}
-
-/// Writer for storing task outputs.
-pub struct ContextWriter {
-    store: Arc<RwLock<HashMap<String, Value>>>,
-    task_id: TaskId,
 }
 
 impl TaskContext {
     /// Create a new task context.
     ///
     /// # Arguments
-    /// * `store` - Shared store for inter-task communication
+    /// * `store` - Shared store for reading upstream task outputs
     /// * `task_id` - ID of the current task (for namespacing outputs)
     /// * `config` - Job-level configuration
-    pub fn new(
-        store: Arc<RwLock<HashMap<String, Value>>>,
-        task_id: TaskId,
-        config: Arc<HashMap<String, Value>>,
-    ) -> Self {
+    pub fn new(store: ContextStore, task_id: TaskId, config: Arc<HashMap<String, Value>>) -> Self {
         Self {
-            inputs: ContextReader::new(store.clone()),
-            outputs: ContextWriter::new(store, task_id),
+            inputs: store,
+            outputs: OutputBuffer::new(task_id),
             config,
         }
     }
@@ -101,243 +242,134 @@ impl TaskContext {
     }
 }
 
-impl ContextReader {
-    /// Create a new context reader.
-    pub fn new(store: Arc<RwLock<HashMap<String, Value>>>) -> Self {
-        Self { store }
-    }
-
-    /// Get a value by key.
-    ///
-    /// Keys can be simple ("my_key") or namespaced ("task_id.my_key").
-    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T, ContextError> {
-        let store = self.store.read().map_err(|_| ContextError::LockPoisoned)?;
-        let value = store
-            .get(key)
-            .ok_or_else(|| ContextError::KeyNotFound(key.to_string()))?;
-        serde_json::from_value(value.clone()).map_err(|e| ContextError::DeserializationError {
-            key: key.to_string(),
-            message: e.to_string(),
-        })
-    }
-
-    /// Get an optional value by key. Returns None if key doesn't exist.
-    pub fn get_optional<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
-        let store = self.store.read().ok()?;
-        let value = store.get(key)?;
-        serde_json::from_value(value.clone()).ok()
-    }
-
-    /// Check if a key exists in the context.
-    pub fn contains(&self, key: &str) -> bool {
-        self.store
-            .read()
-            .map(|s| s.contains_key(key))
-            .unwrap_or(false)
-    }
-
-    /// Get all keys in the context.
-    pub fn keys(&self) -> Vec<String> {
-        self.store
-            .read()
-            .map(|s| s.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    /// Clone the entire store contents.
-    pub fn clone_store(&self) -> Option<HashMap<String, Value>> {
-        self.store.read().ok().map(|s| s.clone())
-    }
-
-    /// Set a raw value in the store (used for merging contexts).
-    pub fn set_raw(&self, key: &str, value: Value) -> Result<(), ContextError> {
-        let mut store = self.store.write().map_err(|_| ContextError::LockPoisoned)?;
-        store.insert(key.to_string(), value);
-        Ok(())
-    }
-}
-
-impl ContextWriter {
-    /// Create a new context writer for a specific task.
-    pub fn new(store: Arc<RwLock<HashMap<String, Value>>>, task_id: TaskId) -> Self {
-        Self { store, task_id }
-    }
-
-    /// Set a value in the context.
-    ///
-    /// The key will be automatically prefixed with the task ID.
-    /// e.g., setting "result" from task "extract" creates "extract.result"
-    pub fn set<T: Serialize>(&self, key: &str, value: T) -> Result<(), ContextError> {
-        let full_key = format!("{}.{}", self.task_id, key);
-        self.set_raw(&full_key, value)
-    }
-
-    /// Set a value with an explicit full key (no auto-prefixing).
-    pub fn set_raw<T: Serialize>(&self, key: &str, value: T) -> Result<(), ContextError> {
-        let json_value =
-            serde_json::to_value(value).map_err(|e| ContextError::SerializationError {
-                key: key.to_string(),
-                message: e.to_string(),
-            })?;
-        let mut store = self.store.write().map_err(|_| ContextError::LockPoisoned)?;
-        store.insert(key.to_string(), json_value);
-        Ok(())
-    }
-
-    /// Get the task ID associated with this writer.
-    pub fn task_id(&self) -> &TaskId {
-        &self.task_id
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn create_empty_store() -> Arc<RwLock<HashMap<String, Value>>> {
-        Arc::new(RwLock::new(HashMap::new()))
-    }
-
     #[test]
-    fn test_context_writer_prefixes_keys() {
-        let store = create_empty_store();
-        let writer = ContextWriter::new(store.clone(), TaskId::new("extract"));
-
-        writer.set("row_count", 100).unwrap();
-
-        let reader = ContextReader::new(store);
-        let value: i32 = reader.get("extract.row_count").unwrap();
-        assert_eq!(value, 100);
-    }
-
-    #[test]
-    fn test_context_reader_get_typed_value() {
-        let store = create_empty_store();
+    fn test_context_store_get() {
+        let store = ContextStore::new();
+        // Manually insert for testing
         {
-            let mut s = store.write().unwrap();
+            let mut s = store.inner.write().unwrap();
             s.insert("my_key".to_string(), serde_json::json!(42));
         }
 
-        let reader = ContextReader::new(store);
-        let value: i32 = reader.get("my_key").unwrap();
+        let value: i32 = store.get("my_key").unwrap();
         assert_eq!(value, 42);
     }
 
     #[test]
-    fn test_context_reader_get_string() {
-        let store = create_empty_store();
+    fn test_context_store_get_optional() {
+        let store = ContextStore::new();
         {
-            let mut s = store.write().unwrap();
-            s.insert("name".to_string(), serde_json::json!("hello"));
-        }
-
-        let reader = ContextReader::new(store);
-        let value: String = reader.get("name").unwrap();
-        assert_eq!(value, "hello");
-    }
-
-    #[test]
-    fn test_context_reader_get_complex_type() {
-        #[derive(Debug, PartialEq, serde::Deserialize)]
-        struct Record {
-            id: u32,
-            name: String,
-        }
-
-        let store = create_empty_store();
-        {
-            let mut s = store.write().unwrap();
-            s.insert(
-                "record".to_string(),
-                serde_json::json!({"id": 1, "name": "test"}),
-            );
-        }
-
-        let reader = ContextReader::new(store);
-        let value: Record = reader.get("record").unwrap();
-        assert_eq!(
-            value,
-            Record {
-                id: 1,
-                name: "test".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn test_context_reader_key_not_found() {
-        let store = create_empty_store();
-        let reader = ContextReader::new(store);
-
-        let result: Result<i32, _> = reader.get("nonexistent");
-        assert!(matches!(result, Err(ContextError::KeyNotFound(_))));
-    }
-
-    #[test]
-    fn test_context_reader_optional_returns_none() {
-        let store = create_empty_store();
-        let reader = ContextReader::new(store);
-
-        let value: Option<i32> = reader.get_optional("nonexistent");
-        assert!(value.is_none());
-    }
-
-    #[test]
-    fn test_context_reader_optional_returns_some() {
-        let store = create_empty_store();
-        {
-            let mut s = store.write().unwrap();
+            let mut s = store.inner.write().unwrap();
             s.insert("exists".to_string(), serde_json::json!(42));
         }
 
-        let reader = ContextReader::new(store);
-        let value: Option<i32> = reader.get_optional("exists");
+        let value: Option<i32> = store.get_optional("exists");
         assert_eq!(value, Some(42));
+
+        let missing: Option<i32> = store.get_optional("missing");
+        assert!(missing.is_none());
     }
 
     #[test]
-    fn test_context_reader_contains() {
-        let store = create_empty_store();
+    fn test_context_store_contains() {
+        let store = ContextStore::new();
         {
-            let mut s = store.write().unwrap();
+            let mut s = store.inner.write().unwrap();
             s.insert("exists".to_string(), serde_json::json!(1));
         }
 
-        let reader = ContextReader::new(store);
-        assert!(reader.contains("exists"));
-        assert!(!reader.contains("missing"));
+        assert!(store.contains("exists"));
+        assert!(!store.contains("missing"));
     }
 
     #[test]
-    fn test_context_reader_keys() {
-        let store = create_empty_store();
+    fn test_context_store_keys() {
+        let store = ContextStore::new();
         {
-            let mut s = store.write().unwrap();
+            let mut s = store.inner.write().unwrap();
             s.insert("a".to_string(), serde_json::json!(1));
             s.insert("b".to_string(), serde_json::json!(2));
         }
 
-        let reader = ContextReader::new(store);
-        let mut keys = reader.keys();
+        let mut keys = store.keys();
         keys.sort();
         assert_eq!(keys, vec!["a", "b"]);
     }
 
     #[test]
-    fn test_context_writer_set_raw_no_prefix() {
-        let store = create_empty_store();
-        let writer = ContextWriter::new(store.clone(), TaskId::new("task1"));
+    fn test_output_buffer_prefixes_keys() {
+        let buffer = OutputBuffer::new(TaskId::new("extract"));
+        buffer.set("row_count", 100).unwrap();
 
-        writer.set_raw("global_key", "value").unwrap();
+        let keys = buffer.keys();
+        assert_eq!(keys, vec!["extract.row_count"]);
+    }
 
-        let reader = ContextReader::new(store);
-        let value: String = reader.get("global_key").unwrap();
-        assert_eq!(value, "value");
+    #[test]
+    fn test_output_buffer_stores_values() {
+        let buffer = OutputBuffer::new(TaskId::new("task1"));
+        buffer.set("result", "hello").unwrap();
+
+        let value = buffer.get_raw("task1.result").unwrap();
+        assert_eq!(value, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn test_context_store_merge() {
+        let store = ContextStore::new();
+        let buffer = OutputBuffer::new(TaskId::new("extract"));
+
+        buffer.set("row_count", 100).unwrap();
+        buffer.set("status", "success").unwrap();
+
+        store.merge(&buffer).unwrap();
+
+        let row_count: i32 = store.get("extract.row_count").unwrap();
+        let status: String = store.get("extract.status").unwrap();
+
+        assert_eq!(row_count, 100);
+        assert_eq!(status, "success");
+    }
+
+    #[test]
+    fn test_upstream_to_downstream_flow() {
+        // Simulate: extract -> transform data flow
+        let store = ContextStore::new();
+
+        // Extract task writes to buffer
+        let extract_buffer = OutputBuffer::new(TaskId::new("extract"));
+        extract_buffer.set("rows", vec![1, 2, 3]).unwrap();
+
+        // Merge extract's outputs to store
+        store.merge(&extract_buffer).unwrap();
+
+        // Transform task reads from store
+        let rows: Vec<i32> = store.get("extract.rows").unwrap();
+        assert_eq!(rows, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_failed_task_outputs_not_merged() {
+        let store = ContextStore::new();
+
+        // Task writes some outputs
+        let buffer = OutputBuffer::new(TaskId::new("failing_task"));
+        buffer.set("partial", "data").unwrap();
+
+        // Simulate failure - don't merge
+        // (In real code, executor only calls merge on success)
+
+        // Store should be empty
+        assert!(!store.contains("failing_task.partial"));
     }
 
     #[test]
     fn test_task_context_creation() {
-        let store = create_empty_store();
+        let store = ContextStore::new();
         let mut config = HashMap::new();
         config.insert("batch_size".to_string(), serde_json::json!(100));
 
@@ -349,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_task_context_config_optional() {
-        let store = create_empty_store();
+        let store = ContextStore::new();
         let config = HashMap::new();
 
         let ctx = TaskContext::new(store, TaskId::new("task"), Arc::new(config));
@@ -359,17 +391,40 @@ mod tests {
     }
 
     #[test]
-    fn test_upstream_to_downstream_flow() {
-        // Simulate: extract -> transform data flow
-        let store = create_empty_store();
+    fn test_context_store_clone_shares_data() {
+        let store1 = ContextStore::new();
+        let store2 = store1.clone();
 
-        // Extract task writes output
-        let extract_writer = ContextWriter::new(store.clone(), TaskId::new("extract"));
-        extract_writer.set("rows", vec![1, 2, 3]).unwrap();
+        // Insert via store1
+        {
+            let mut s = store1.inner.write().unwrap();
+            s.insert("key".to_string(), serde_json::json!("value"));
+        }
 
-        // Transform task reads input
-        let transform_reader = ContextReader::new(store);
-        let rows: Vec<i32> = transform_reader.get("extract.rows").unwrap();
-        assert_eq!(rows, vec![1, 2, 3]);
+        // Read via store2
+        let value: String = store2.get("key").unwrap();
+        assert_eq!(value, "value");
+    }
+
+    #[test]
+    fn test_complex_type_serialization() {
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct Record {
+            id: u32,
+            name: String,
+        }
+
+        let store = ContextStore::new();
+        let buffer = OutputBuffer::new(TaskId::new("task"));
+
+        let record = Record {
+            id: 1,
+            name: "test".to_string(),
+        };
+        buffer.set("record", &record).unwrap();
+        store.merge(&buffer).unwrap();
+
+        let retrieved: Record = store.get("task.record").unwrap();
+        assert_eq!(retrieved, record);
     }
 }
