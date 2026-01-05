@@ -31,7 +31,7 @@ use super::handlers::{EventForwarder, TaskStateUpdater};
 use super::types::SchedulerCommand;
 
 /// Number of most recent runs to check when evaluating job dependencies.
-const DEPENDENCY_CHECK_LIMIT: usize = 1;
+const DEPENDENCY_CHECK_LIMIT: usize = 10;
 
 /// Main scheduler for job execution.
 pub struct Scheduler<S: Storage> {
@@ -412,18 +412,21 @@ impl<S: Storage + 'static> Scheduler<S> {
                     }
                 }
                 DependencyCondition::WithinWindow(window) => {
-                    if last_run.status != RunStatus::Completed {
-                        return false;
-                    }
-
-                    // Check if the run is within the window
-                    if let Some(ended_at) = last_run.ended_at {
-                        let now = std::time::SystemTime::now();
-                        let elapsed = now.duration_since(ended_at).unwrap_or(Duration::MAX);
-                        if elapsed > *window {
+                    // Check if ANY run within the window completed successfully
+                    let now = std::time::SystemTime::now();
+                    let has_success_within_window = runs.iter().any(|run| {
+                        if run.status != RunStatus::Completed {
                             return false;
                         }
-                    } else {
+                        if let Some(ended_at) = run.ended_at {
+                            let elapsed = now.duration_since(ended_at).unwrap_or(Duration::MAX);
+                            elapsed <= *window
+                        } else {
+                            false
+                        }
+                    });
+
+                    if !has_success_within_window {
                         return false;
                     }
                 }
@@ -1134,6 +1137,55 @@ mod tests {
         // Now downstream should work (upstream completed within window)
         let result = handle.trigger("downstream").await;
         assert!(result.is_ok());
+
+        handle.shutdown().await.unwrap();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn test_within_window_checks_all_runs_not_just_last() {
+        // This test verifies the fix for issue #128:
+        // WithinWindow should check if ANY run within the window succeeded,
+        // not just the most recent run.
+        use crate::storage::StoredRun;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut scheduler: Scheduler<InMemoryStorage> =
+            Scheduler::with_storage(Arc::clone(&storage));
+
+        // Upstream job
+        let upstream = create_job("upstream", "Upstream Job");
+        scheduler.register(upstream);
+
+        // Downstream requires upstream to have completed within 1 hour
+        let downstream = create_job("downstream", "Downstream Job").with_dependency(
+            JobDependency::with_condition(
+                JobId::new("upstream"),
+                DependencyCondition::WithinWindow(Duration::from_secs(3600)),
+            ),
+        );
+        scheduler.register(downstream);
+
+        // Manually create a successful run in storage (simulating a completed run)
+        let mut success_run = StoredRun::new(RunId::new(), JobId::new("upstream"));
+        success_run.mark_completed();
+        storage.save_run(success_run).await.unwrap();
+
+        // Now create a failed run (this becomes the "last" run)
+        let mut failed_run = StoredRun::new(RunId::new(), JobId::new("upstream"));
+        failed_run.mark_failed("simulated failure");
+        storage.save_run(failed_run).await.unwrap();
+
+        let (handle, task) = scheduler.start().await;
+
+        // Even though the last run failed, there's a successful run within the window,
+        // so downstream should be able to trigger
+        let result = handle.trigger("downstream").await;
+        assert!(
+            result.is_ok(),
+            "Downstream should trigger because a successful run exists within the window, \
+             even if the most recent run failed"
+        );
 
         handle.shutdown().await.unwrap();
         let _ = task.await;
