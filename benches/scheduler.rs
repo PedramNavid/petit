@@ -1,7 +1,7 @@
 //! Benchmarks for schedule next-run calculations.
 
 use chrono::{TimeZone, Utc};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use petit::Schedule;
 
 fn bench_next_n_occurrences(c: &mut Criterion) {

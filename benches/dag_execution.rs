@@ -5,7 +5,7 @@
 //! - Topological sorting
 
 use async_trait::async_trait;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use petit::core::context::TaskContext;
 use petit::core::dag::{Dag, DagBuilder};
 use petit::core::task::{Task, TaskError};

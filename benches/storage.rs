@@ -2,7 +2,7 @@
 //!
 //! Measures the performance of list operations.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use petit::core::types::{DagId, JobId, RunId, TaskId};
 use petit::{InMemoryStorage, Storage, StoredJob, StoredRun, StoredTaskState};
 use tokio::runtime::Runtime;
@@ -77,6 +77,11 @@ fn bench_list_task_states(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_list_jobs, bench_list_runs, bench_list_task_states);
+criterion_group!(
+    benches,
+    bench_list_jobs,
+    bench_list_runs,
+    bench_list_task_states
+);
 
 criterion_main!(benches);
