@@ -16,7 +16,7 @@ CLUSTER_HOSTS := cube1 cube2 cube3 cube4
 DIST_DIR := dist
 
 .PHONY: all check fmt fmt-check lint test bench build build-tui build-arm64 build-arm64-tui \
-        build-all setup-cross deploy deploy-jobs install-service start-service stop-service \
+        build-all setup-cross deploy deploy-jobs install install-service start-service stop-service \
         restart-service status-service logs run run-sqlite tui clean ci help
 
 help:
@@ -28,8 +28,9 @@ help:
 	@echo "  make build-arm64      Cross-compile for Linux ARM64 (aarch64)"
 	@echo "  make build-arm64-tui  Cross-compile with TUI for Linux ARM64"
 	@echo "  make build-all        Build for all platforms"
+	@echo "  make install          Install pt and petit-tui to ~/.cargo/bin"
 	@echo "  make setup-cross      Install cross-compilation toolchain"
-	@echo "  make deploy           Deploy ARM64 binary to cluster hosts (cube1-cube4)"
+	@echo "  make deploy           Deploy pt and petit-tui to cluster hosts (cube1-cube4)"
 	@echo "  make deploy-jobs      Deploy job YAML files to cluster hosts"
 	@echo "  make install-service  Install systemd service on cluster hosts"
 	@echo "  make start-service    Start petit on all cluster hosts"
@@ -103,6 +104,11 @@ build-arm64-tui:
 # Build for all platforms
 build-all: build build-arm64
 
+# Install binaries to ~/.cargo/bin
+install:
+	cargo install --path .
+	cargo install --path . --bin petit-tui --features tui
+
 # Setup cross-compilation toolchain
 setup-cross:
 	rustup target add $(TARGET_ARM64)
@@ -116,11 +122,11 @@ setup-cross:
 TARGETS = $(if $(HOST),$(HOST),$(CLUSTER_HOSTS))
 
 # Deploy to cluster hosts
-deploy: build-arm64
+deploy: build-arm64-tui
 	@for host in $(TARGETS); do \
 		echo "Deploying to $$host..."; \
 		ssh $$host 'mkdir -p ~/bin ~/pt/jobs' && \
-		scp $(DIST_DIR)/$(TARGET_ARM64)/pt $$host:~/bin/pt; \
+		scp $(DIST_DIR)/$(TARGET_ARM64)/pt $(DIST_DIR)/$(TARGET_ARM64)/petit-tui $$host:~/bin/; \
 	done
 
 # Install systemd service on cluster hosts

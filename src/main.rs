@@ -871,7 +871,7 @@ async fn trigger_job(
     #[cfg(feature = "sqlite")]
     if let Some(db) = db_path {
         info!("Using SQLite storage: {}", db.display());
-        let storage = SqliteStorage::new(&db).await?;
+        let storage = Arc::new(SqliteStorage::new(&db).await?);
         return trigger_job_with_storage(storage, jobs, event_bus, job_id, completed).await;
     }
 
@@ -879,19 +879,19 @@ async fn trigger_job(
     let _ = db_path; // suppress unused warning
 
     info!("Using in-memory storage");
-    let storage = InMemoryStorage::new();
+    let storage = Arc::new(InMemoryStorage::new());
     trigger_job_with_storage(storage, jobs, event_bus, job_id, completed).await
 }
 
 /// Helper to trigger a job with any storage type.
 async fn trigger_job_with_storage<S: Storage + 'static>(
-    storage: S,
+    storage: Arc<S>,
     jobs: Vec<petit::Job>,
     event_bus: EventBus,
     job_id: String,
     completed: Arc<tokio::sync::Notify>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut scheduler = Scheduler::new(storage).with_event_bus(event_bus);
+    let mut scheduler = Scheduler::with_storage(Arc::clone(&storage)).with_event_bus(event_bus);
 
     // Register all jobs (needed for dependency resolution)
     for job in jobs {
