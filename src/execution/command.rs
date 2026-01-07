@@ -344,6 +344,7 @@ impl Task for CommandTask {
                     _ = tokio::time::sleep(duration) => {
                         // Timeout occurred - kill the process to prevent orphaned processes
                         let _ = child.kill().await;
+
                         return Err(TaskError::Timeout(duration));
                     }
                 }
