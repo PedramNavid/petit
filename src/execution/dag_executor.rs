@@ -833,6 +833,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_complex_dag_with_skipped_on_failure_handler_succeeds() {
+        // Simulates a real workflow like:
+        //   task1 -> task2 -> task3 -> task4 -> task5 -> task6 -> task7
+        //                                                   |
+        //                                          send_error (OnFailure - should skip)
+        //                                                   |
+        //                                          send_summary (AllDone - should run)
+        //
+        // When all main tasks succeed, send_error should be skipped but DAG should succeed.
+        let executor = DagExecutor::with_concurrency(4);
+
+        let dag = DagBuilder::new("complex_workflow", "Complex Workflow DAG")
+            .add_task(SimpleTask::new("task1"))
+            .add_task_with_deps(SimpleTask::new("task2"), &["task1"])
+            .add_task_with_deps(SimpleTask::new("task3"), &["task2"])
+            .add_task_with_deps(SimpleTask::new("task4"), &["task3"])
+            .add_task_with_deps(SimpleTask::new("task5"), &["task4"])
+            .add_task_with_deps(SimpleTask::new("task6"), &["task5"])
+            .add_task_with_deps(SimpleTask::new("task7"), &["task6"])
+            // Error handler - only runs if any task fails
+            .add_task_with_deps_and_condition(
+                SimpleTask::new("send_error"),
+                &["task7"],
+                TaskCondition::OnFailure,
+            )
+            // Summary always runs after everything (using AllDone)
+            .add_task_with_deps_and_condition(
+                SimpleTask::new("send_summary"),
+                &["task7", "send_error"],
+                TaskCondition::AllDone,
+            )
+            .build()
+            .unwrap();
+
+        let mut ctx = create_shared_context();
+        let result = executor.execute(&dag, &mut ctx).await;
+
+        // All main tasks should complete
+        for i in 1..=7 {
+            assert_eq!(
+                result.task_statuses.get(&TaskId::new(&format!("task{}", i))),
+                Some(&TaskStatus::Completed),
+                "task{} should be completed",
+                i
+            );
+        }
+
+        // send_error should be skipped (no failures upstream)
+        assert_eq!(
+            result.task_statuses.get(&TaskId::new("send_error")),
+            Some(&TaskStatus::Skipped),
+            "send_error should be skipped when all tasks succeed"
+        );
+
+        // send_summary should complete (AllDone runs regardless)
+        assert_eq!(
+            result.task_statuses.get(&TaskId::new("send_summary")),
+            Some(&TaskStatus::Completed),
+            "send_summary should complete"
+        );
+
+        // DAG should succeed - skipped on_failure tasks don't cause failure
+        assert!(
+            result.success,
+            "DAG should succeed when only on_failure tasks are skipped"
+        );
+        assert_eq!(result.failed_count(), 0);
+        assert_eq!(result.skipped_count(), 1);
+    }
+
+    #[tokio::test]
     async fn test_all_done_condition_runs_regardless_of_status() {
         // A (fails) -> B (AllDone, should run)
         let executor = DagExecutor::with_concurrency(4);

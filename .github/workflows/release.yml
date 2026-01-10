@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.2.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+
+          # Linux aarch64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+
+          # macOS x86_64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+
+          # macOS aarch64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build binaries (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }} --features tui
+
+      - name: Build binaries (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} --features tui
+
+      - name: Prepare archive
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/pt dist/
+          cp target/${{ matrix.target }}/release/petit-tui dist/
+          cd dist
+          tar -czvf ../petit-${{ matrix.target }}.tar.gz *
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: petit-${{ matrix.target }}
+          path: petit-${{ matrix.target }}.tar.gz
+          retention-days: 1
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f -name "*.tar.gz" -exec mv {} release/ \;
+          ls -la release/
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum * > checksums-sha256.txt
+          cat checksums-sha256.txt
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Release ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
+          generate_release_notes: true
+          files: |
+            release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

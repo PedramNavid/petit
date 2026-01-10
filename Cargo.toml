@@ -3,6 +3,7 @@ name = "petit"
 version = "0.2.0"
 edition = "2024"
 description = "A minimal, lightweight task orchestrator with cron-like scheduling"
+default-run = "pt"
 
 [[bin]]
 name = "pt"
